@@ -95,6 +95,9 @@ class IPCDistributedSegmentedDataset(Dataset):
         # Trick islice to return a subset of events at a time
         return list(islice(self.json_entry_gen, 0, self.end_idx - self.start_idx))
 
+    def reset_generator(self):
+        self.json_entry_gen = self._init_entry_generator()
+
     def set_start_idx(self, start_idx):
         self.start_idx       = start_idx
         self.end_idx         = self.calculate_end_idx()
