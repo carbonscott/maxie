@@ -95,13 +95,15 @@ class IPCDistributedSegmentedDataset(Dataset):
         # Trick islice to return a subset of events at a time
         return list(islice(self.json_entry_gen, 0, self.end_idx - self.start_idx))
 
-    def set_start_idx(self, start_idx):
+    def set_start_idx(self, start_idx, resumes_from_checkpoint = False):
         self.start_idx = start_idx
         self.end_idx   = self.calculate_end_idx()
 
-        # Reset generator if start_idx is rewind to 0
-        if self.start_idx == 0:
-            self.json_entry_gen = self._init_entry_generator()
+        # Check if we need to reset and/or advance the generator
+        if resumes_from_checkpoint or self.start_idx == 0:
+            # Initialize the generator for a resumption or rewind
+            json_entry_gen = self._init_entry_generator()
+            self.json_entry_gen = islice(json_entry_gen, self.start_idx, None)
 
         self.current_dataset = self.update_dataset_segment()
 
@@ -146,7 +148,7 @@ class IPCDistributedSegmentedDataset(Dataset):
         checkpoint = broadcast_dict(checkpoint, src=0, device=device)
 
         if checkpoint:
-            self.set_start_idx(checkpoint.get('end_idx', 0))
+            self.set_start_idx(checkpoint.get('end_idx', 0), resumes_from_checkpoint = True)
             if 'micro_batch_size_per_rank' in checkpoint and checkpoint['micro_batch_size_per_rank'] != self.micro_batch_size_per_rank:
                 warnings.warn(f"micro_batch_size_per_rank has been changed from {checkpoint['micro_batch_size_per_rank']} to {self.micro_batch_size_per_rank}. Resetting to {checkpoint['micro_batch_size_per_rank']}.")
                 self.micro_batch_size_per_rank = checkpoint['micro_batch_size_per_rank']
