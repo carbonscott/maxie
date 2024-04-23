@@ -65,7 +65,6 @@ class IPCDistributedSegmentedDataset(Dataset):
         self.current_dataset = None
 
         self.set_start_idx(start_idx = 0)
-        self.update_dataset_segment()
 
     def _load_json(self):
         with open(self.path_json, 'r') as file:
@@ -97,8 +96,9 @@ class IPCDistributedSegmentedDataset(Dataset):
         return list(islice(self.json_entry_gen, 0, self.end_idx - self.start_idx))
 
     def set_start_idx(self, start_idx):
-        self.start_idx = start_idx
-        self.end_idx = self.calculate_end_idx()
+        self.start_idx       = start_idx
+        self.end_idx         = self.calculate_end_idx()
+        self.current_dataset = self.update_dataset_segment()
 
     def __len__(self):
         return self.end_idx - self.start_idx
@@ -108,11 +108,8 @@ class IPCDistributedSegmentedDataset(Dataset):
         if idx >= (self.end_idx - self.start_idx):
             raise IndexError("Index out of range for the current segment")
 
-        # Map the local index to the correct global index within the segment
-        global_idx = self.start_idx + idx
-
         # Obtain dataset handle
-        exp, run, access_mode, detector_name, event = self.full_dataset[global_idx]
+        exp, run, access_mode, detector_name, event = self.current_dataset[idx]
 
         # Fetch event
         image = self.fetch_event(exp, run, access_mode, detector_name, event)    # psana image: (H, W)
