@@ -4,6 +4,7 @@ import json
 import socket
 import numpy as np
 
+from math import ceil
 from itertools import islice
 
 import torch
@@ -35,6 +36,7 @@ class IPCDistributedSegmentedDatasetConfig:
         transforms (List): A list of transformations to apply to each data item.
         is_perf (bool): Flag to enable performance timing for transformations. Default is False.
         server_address (str): URL of the server to fetch data from. Defaults to 'http://localhost:5001'.
+        loads_segment_in_init (bool) : Whether to load the first segment in the init.
     """
     path_json                : str
     micro_batch_size_per_rank: int
@@ -42,6 +44,7 @@ class IPCDistributedSegmentedDatasetConfig:
     transforms               : List
     is_perf                  : bool = False
     server_address           : Tuple = ('localhost', 5000)
+    loads_segment_in_init    : bool = False
 
 class IPCDistributedSegmentedDataset(Dataset):
     """A dataset class designed for fetching and distributing segments of data
@@ -57,6 +60,7 @@ class IPCDistributedSegmentedDataset(Dataset):
         self.server_address            = config.server_address
         self.transforms                = config.transforms
         self.is_perf                   = config.is_perf
+        self.loads_segment_in_init     = config.loads_segment_in_init
 
         self.json_entry_list = self._load_json()
         self.total_size      = self._get_total_size()
@@ -64,7 +68,9 @@ class IPCDistributedSegmentedDataset(Dataset):
         self.json_entry_gen  = None
         self.current_dataset = None
 
-        self.set_start_idx(start_idx = 0)
+        self.start_idx = 0
+        self.end_idx   = 0
+        if self.loads_segment_in_init: self.set_start_idx(start_idx = 0)
 
     def _load_json(self):
         with open(self.path_json, 'r') as file:
@@ -90,6 +96,10 @@ class IPCDistributedSegmentedDataset(Dataset):
     def calculate_end_idx(self):
         # Calculate and return the end index for the current dataset segment.
         return min(self.start_idx + self.micro_batch_size_per_rank * self.world_size, self.total_size)
+
+    @property
+    def num_seg(self):
+        return ceil(self.total_size / (self.micro_batch_size_per_rank * self.world_size))
 
     def update_dataset_segment(self):
         # Trick islice to return a subset of events at a time
@@ -120,6 +130,10 @@ class IPCDistributedSegmentedDataset(Dataset):
 
         # Fetch event
         image = self.fetch_event(exp, run, access_mode, detector_name, event)    # psana image: (H, W)
+
+        ## # [DEBUG]
+        ## if dist.is_initialized():
+        ##     print(f"[RANK {dist.get_rank()}] exp={exp}, run={run}, detector_name={detector_name}, event={event}.")
 
         # Apply transforms
         image_tensor = None
