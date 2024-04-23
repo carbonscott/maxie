@@ -60,8 +60,8 @@ class IPCDistributedSegmentedDataset(Dataset):
 
         self.json_entry_list = self._load_json()
         self.total_size      = self._get_total_size()
-        self.json_entry_gen  = self._init_entry_generator()
 
+        self.json_entry_gen  = None
         self.current_dataset = None
 
         self.set_start_idx(start_idx = 0)
@@ -95,12 +95,14 @@ class IPCDistributedSegmentedDataset(Dataset):
         # Trick islice to return a subset of events at a time
         return list(islice(self.json_entry_gen, 0, self.end_idx - self.start_idx))
 
-    def reset_generator(self):
-        self.json_entry_gen = self._init_entry_generator()
-
     def set_start_idx(self, start_idx):
-        self.start_idx       = start_idx
-        self.end_idx         = self.calculate_end_idx()
+        self.start_idx = start_idx
+        self.end_idx   = self.calculate_end_idx()
+
+        # Reset generator if start_idx is rewind to 0
+        if self.start_idx == 0:
+            self.json_entry_gen = self._init_entry_generator()
+
         self.current_dataset = self.update_dataset_segment()
 
     def __len__(self):
