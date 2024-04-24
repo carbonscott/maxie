@@ -14,15 +14,15 @@ from contextlib import nullcontext
 from datetime import timedelta
 
 # -- maxie specific imports
-from maxie.datasets.ipc_dataset_dist import IPCDistributedSegmentedDatasetConfig, IPCDistributedSegmentedDataset, IPCDatasetConfig, IPCDataset
-from maxie.modeling.adapted_mae      import AdaptedViTMAEForPreTrainingConfig, AdaptedViTMAEForPreTraining
-from maxie.utils.logger              import init_logger
-from maxie.utils.seed                import set_seed
-from maxie.utils.misc                import is_action_due
-from maxie.lr_scheduler              import CosineLRScheduler
-from maxie.perf                      import Timer
-from maxie.tensor_transforms         import Pad, DownscaleLocalMean, RandomPatch, RandomRotate, RandomShift, Patchify
-from maxie.utils_fsdp                import (
+from maxie.datasets.ipc_segmented_dataset_dist import IPCDistributedSegmentedDatasetConfig, IPCDistributedSegmentedDataset, IPCDatasetConfig, IPCDataset
+from maxie.modeling.adapted_mae import AdaptedViTMAEForPreTrainingConfig, AdaptedViTMAEForPreTraining
+from maxie.utils.logger         import init_logger
+from maxie.utils.seed           import set_seed
+from maxie.utils.misc           import is_action_due
+from maxie.lr_scheduler         import CosineLRScheduler
+from maxie.perf                 import Timer
+from maxie.tensor_transforms    import Pad, DownscaleLocalMean, RandomPatch, RandomRotate, RandomShift, Patchify
+from maxie.utils_fsdp           import (
     MemoryMaximizer,
     verify_bfloat_support,
     TrainingStateDictConfig,
