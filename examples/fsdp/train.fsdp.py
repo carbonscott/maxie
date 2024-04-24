@@ -573,7 +573,7 @@ try:
                 # --- Train
                 # Get a random subset of the training set
                 dataset_eval_train.reset()
-                high_seg_idx = dataset_eval_train.total_size - micro_batch_size_per_rank * world_size
+                high_seg_idx = dataset_eval_train.total_size - micro_batch_size_per_rank * dist_world_size
                 rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,))
                 dataset_eval_train.set_start_idx(rand_start_idx)
 
@@ -590,7 +590,7 @@ try:
                 # --- Validation
                 # Get a random subset of the validation set
                 dataset_eval_val.reset()
-                high_seg_idx = dataset_eval_val.total_size - micro_batch_size_per_rank * world_size
+                high_seg_idx = dataset_eval_val.total_size - micro_batch_size_per_rank * dist_world_size
                 rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,))
                 dataset_eval_val.set_start_idx(rand_start_idx)
 
@@ -605,7 +605,7 @@ try:
                 if validate_loss < loss_min:
                     loss_min = validate_loss.item()
 
-                    dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{end_idx}"
+                    dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
                     if dir_chkpt_prefix is not None: dir_chkpt = f"{dir_chkpt_prefix}.{dir_chkpt}"
                     path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
                     checkpointer.save(model, optimizer, scheduler, training_state, path_chkpt)
