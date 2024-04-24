@@ -451,9 +451,8 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
 
         ## print("Pre fetching")
 
-        batch_input, batch_target = batch_data
-        batch_input  = batch_input.to(device, non_blocking = True)
-        batch_target = batch_target.to(device, non_blocking = True)
+        batch_input = batch_data
+        batch_input = batch_input.to(device, non_blocking = True)
 
         ## print("Post fetching")
 
