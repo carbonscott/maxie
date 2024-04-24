@@ -284,7 +284,7 @@ def broadcast_dict(obj, src=0, device = 'cpu'):
 class TrainingStateDictConfig:
     epoch      : int
     start_idx  : int
-    seg_size   : int
+    end_idx    : int
     loss_min   : float
 
 
@@ -531,7 +531,7 @@ class ShardedStateDictCheckpointConfig:
     training_state : TrainingStateDictConfig
     rank           : int
     device         : str
-    path_checkpoint: Optional[str]    # A directory
+    path_checkpoint: Optional[str]    # Path to a previously saved checkpoint directory
 
 class ShardedStateDictCheckpoint:
     def __init__(self, config):
