@@ -370,7 +370,7 @@ if dist_rank == 0:
 # ----------------------------------------------------------------------- #
 #  CRITERION (LOSS)
 # ----------------------------------------------------------------------- #
-print(f'[RANK {dist_rank}] Confguring criterion (Skip, it's configured in the model)...')
+print(f'[RANK {dist_rank}] Confguring criterion (Skip, it is configured in the model)...')
 
 
 # ----------------------------------------------------------------------- #
