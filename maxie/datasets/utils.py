@@ -1,4 +1,5 @@
 import numpy as np
+import json
 
 def apply_mask(data, mask, mask_value = np.nan):
     """
@@ -68,3 +69,38 @@ def split_dict_into_chunk(input_dict, max_num_chunk = 2):
         if idx_e == size_dict: break
 
     return chunked_dict_in_list
+
+
+def load_dataset_in_json(path_json):
+    """
+    Sample JSON:
+    [
+        {
+            "exp": "mfxp1002121",
+            "run": 7,
+            "detector_name": "Rayonix",
+            "events": [500, 501],
+            "num_events" : 4234
+        },
+        {
+            "exp": "xpptut15",
+            "run": 630,
+            "detector_name": "jungfrau1M",
+            "events": null,
+            "num_events" : 4234
+        },
+    ]
+    """
+    PSANA_ACCESS_MODE = 'idx'
+    with open(path_json, 'r') as file:
+        entry_list = json.load(file)
+        for entry in entry_list:
+            exp           = entry['exp'          ]
+            run           = entry['run'          ]
+            detector_name = entry['detector_name']
+            events        = entry['events'       ]
+            num_events    = entry['num_events'   ]
+            if events is None:
+                events = range(num_events)
+            for event in events:
+                yield (exp, run, PSANA_ACCESS_MODE, detector_name, event)
