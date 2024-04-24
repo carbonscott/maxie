@@ -67,10 +67,16 @@ class IPCDistributedSegmentedDataset(Dataset):
 
         self.json_entry_gen  = None
         self.current_dataset = None
+        self.start_idx       = 0
+        self.end_idx         = 0
 
-        self.start_idx = 0
-        self.end_idx   = 0
         if self.loads_segment_in_init: self.set_start_idx(start_idx = 0)
+
+    def reset(self):
+        self.start_idx       = 0
+        self.end_idx         = 0
+        self.json_entry_gen  = None
+        self.current_dataset = None
 
     def _load_json(self):
         with open(self.path_json, 'r') as file:
