@@ -306,6 +306,9 @@ ipc_dataset_eval_config = IPCDistributedSegmentedDatasetConfig(
 )
 dataset_eval_val = IPCDistributedSegmentedDataset(ipc_dataset_eval_config)
 
+# -- Custom collate to merge patch and batch dimension using concatenation
+custom_collate = lambda batch: torch.cat(batch, dim=0)  # batch of [N, C, H, W] -> [B * N, C, H, W]
+
 # ----------------------------------------------------------------------- #
 #  MODEL
 # ----------------------------------------------------------------------- #
@@ -524,7 +527,7 @@ try:
 
             # Split sampler across ranks
             sampler = torch.utils.data.DistributedSampler(dataset_train, shuffle=True)
-            dataloader = torch.utils.data.DataLoader(dataset_train, batch_size=batch_size, sampler=sampler, num_workers = num_workers)
+            dataloader = torch.utils.data.DataLoader(dataset_train, batch_size=batch_size, sampler=sampler, num_workers = num_workers, collate_fn=custom_collate)
 
             # Shuffle the training example
             sampler.set_epoch(epoch)
@@ -584,7 +587,7 @@ try:
                 dataset_eval_train.set_start_idx(rand_start_idx)
 
                 sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_train, shuffle=True)
-                dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False)
+                dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
 
                 # Shuffle the training example
                 sampler_eval.set_epoch(0)
@@ -601,7 +604,7 @@ try:
                 dataset_eval_val.set_start_idx(rand_start_idx)
 
                 sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_val, shuffle=True)
-                dataloader_eval = torch.utils.data.DataLoader(dataset_eval_val, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False)
+                dataloader_eval = torch.utils.data.DataLoader(dataset_eval_val, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
                 validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device)
 
                 # Shuffle the training example
