@@ -225,7 +225,7 @@ else:
 sharding_strategy = ShardingStrategy.FULL_SHARD
 
 # --- Wrapping strategy
-auto_wrapper_policy = partial(
+auto_wrap_policy = partial(
     transformer_auto_wrap_policy,
     transformer_layer_cls={
         ViTMAELayer,
