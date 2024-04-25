@@ -46,7 +46,10 @@ from torch.distributed.fsdp import (
 )
 
 # --- Policy wrapper
-from torch.distributed.fsdp.wrap                import size_based_auto_wrap_policy, enable_wrap, wrap
+from torch.distributed.fsdp.wrap import (
+    transformer_auto_wrap_policy,
+)
+from transformers.models.vit_mae import ViTMAELayer    # Shard this layer
 
 # --- Scaler for float16
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
@@ -222,9 +225,12 @@ else:
 sharding_strategy = ShardingStrategy.FULL_SHARD
 
 # --- Wrapping strategy
-min_num_params   = 500_000
-auto_wrap_policy = partial(size_based_auto_wrap_policy,
-                           min_num_params = min_num_params,)
+auto_wrapper_policy = partial(
+    transformer_auto_wrap_policy,
+    transformer_layer_cls={
+        ViTMAELayer,
+    },
+)
 
 # --- Activation checkpointing
 non_reentrant_wrapper = partial(
