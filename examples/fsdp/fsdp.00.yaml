@@ -11,7 +11,7 @@ dataset:
   path_train               : experiments/datasets/test.json
   path_eval                : experiments/datasets/test.json
   micro_batch_size_per_rank: 200
-  server_address           : ('localhost', 5000)
+  server_address           : [localhost, 5000]
   transforms:
     H_pad: 2048
     W_pad: 2048

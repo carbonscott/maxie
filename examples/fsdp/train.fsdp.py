@@ -285,7 +285,7 @@ ipc_dataset_train_config = IPCDistributedSegmentedDatasetConfig(
     world_size                = dist_world_size,
     transforms                = transforms,
     is_perf                   = True,
-    server_address            = server_address,
+    server_address            = tuple(server_address),
     loads_segment_in_init     = False,
 )
 dataset_train = IPCDistributedSegmentedDataset(ipc_dataset_train_config)
