@@ -48,8 +48,10 @@ from torch.distributed.fsdp import (
 # --- Policy wrapper
 from torch.distributed.fsdp.wrap import (
     transformer_auto_wrap_policy,
+    lambda_auto_wrap_policy,
 )
 from transformers.models.vit_mae import ViTMAELayer    # Shard this layer
+from packaging import version
 
 # --- Scaler for float16
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
@@ -225,12 +227,34 @@ else:
 sharding_strategy = ShardingStrategy.FULL_SHARD
 
 # --- Wrapping strategy
-auto_wrap_policy = partial(
+# ---- Use built-in transformer wrap policy
+auto_wrap_policy_transformer = partial(
     transformer_auto_wrap_policy,
     transformer_layer_cls={
         ViTMAELayer,
     },
 )
+
+# ---- Use a custom wrap policy
+# !!! KNOWN ISSUE in PyTorch 2.0.1
+# Refer to https://github.com/pytorch/pytorch/issues/104690#issuecomment-1625445564
+def lambda_fn(module: nn.Module):
+    is_trainable = lambda m: all(p.requires_grad for p in m.parameters())
+
+    # Is it a transformer layer???
+    if isinstance(module, (ViTMAELayer,)): return True
+
+    # Is it a trainable linear layer???
+    if isinstance(module, nn.Linear) and is_trainable(module): return True
+
+    # Otherwise
+    return False
+auto_wrap_policy_custom = partial(lambda_auto_wrap_policy, lambda_fn=lambda_fn)
+
+# ---- Decide policy based on pytorch version
+auto_wrap_policy = auto_wrap_policy_transformer \
+                   if version.parse(torch.__version__) > version.parse("2.0.1") else \
+                   auto_wrap_policy_custom
 
 # --- Activation checkpointing
 non_reentrant_wrapper = partial(
