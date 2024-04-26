@@ -50,7 +50,11 @@ from torch.distributed.fsdp.wrap import (
     transformer_auto_wrap_policy,
     lambda_auto_wrap_policy,
 )
-from transformers.models.vit_mae import ViTMAELayer    # Shard this layer
+from transformers.models.vit_mae.modeling_vit_mae import (
+    ViTMAELayer,
+    ## ViTMAEAttention,
+    ## ViTMAESelfAttention,
+)
 from packaging import version
 
 # --- Scaler for float16
@@ -228,33 +232,14 @@ sharding_strategy = ShardingStrategy.FULL_SHARD
 
 # --- Wrapping strategy
 # ---- Use built-in transformer wrap policy
-auto_wrap_policy_transformer = partial(
+auto_wrap_policy = partial(
     transformer_auto_wrap_policy,
     transformer_layer_cls={
         ViTMAELayer,
+        ## ViTMAEAttention,
+        ## ViTMAESelfAttention,
     },
 )
-
-# ---- Use a custom wrap policy
-# !!! KNOWN ISSUE in PyTorch 2.0.1
-# Refer to https://github.com/pytorch/pytorch/issues/104690#issuecomment-1625445564
-def lambda_fn(module: nn.Module):
-    is_trainable = lambda m: all(p.requires_grad for p in m.parameters())
-
-    # Is it a transformer layer???
-    if isinstance(module, (ViTMAELayer,)): return True
-
-    # Is it a trainable linear layer???
-    if isinstance(module, nn.Linear) and is_trainable(module): return True
-
-    # Otherwise
-    return False
-auto_wrap_policy_custom = partial(lambda_auto_wrap_policy, lambda_fn=lambda_fn)
-
-# ---- Decide policy based on pytorch version
-auto_wrap_policy = auto_wrap_policy_transformer \
-                   if version.parse(torch.__version__) > version.parse("2.0.1") else \
-                   auto_wrap_policy_custom
 
 # --- Activation checkpointing
 non_reentrant_wrapper = partial(
@@ -340,6 +325,14 @@ print(f'[RANK {dist_rank}] Confguring model...')
 # -- Config the model
 model_config = AdaptedViTMAEForPreTrainingConfig(model_name = model_name)
 model = AdaptedViTMAEForPreTraining(model_config)
+
+# !! Make all params trainable, a workaround for pytorch 2.0.1
+torch_version = torch.__version__
+torch_version = torch_version[:torch_version.find('+')]
+if version.parse(torch_version) <= version.parse("2.0.1"):
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            param.requires_grad = True
 
 if dist_rank == 0:
     print(f"{sum(p.numel() for p in model.parameters())/1e6} M pamameters.")
