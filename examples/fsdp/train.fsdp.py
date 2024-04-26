@@ -328,7 +328,7 @@ model = AdaptedViTMAEForPreTraining(model_config)
 
 # !! Make all params trainable, a workaround for pytorch 2.0.1
 torch_version = torch.__version__
-torch_version = torch_version[:torch_version.find('+')]
+torch_version = torch_version[:torch_version.find("+") if "+" in torch_version else None]
 if version.parse(torch_version) <= version.parse("2.0.1"):
     for name, param in model.named_parameters():
         if not param.requires_grad:
