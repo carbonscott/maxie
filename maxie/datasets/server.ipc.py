@@ -1,10 +1,11 @@
+import argparse
 import signal
 import json
 import socket
 from multiprocessing import shared_memory, Process
 import numpy as np
-from peaknet.datasets.utils_psana import PsanaImg
-from peaknet.perf import Timer
+from maxie.datasets.psana_utils import PsanaImg
+from maxie.perf import Timer
 
 # Initialize buffer for each process
 psana_img_buffer = {}
@@ -99,9 +100,21 @@ def start_server(address, num_workers):
     return processes, server_socket
 
 if __name__ == "__main__":
-    server_address = ('localhost', 5000)
-    num_workers = 5
+    print(f"Launching IPC server script...")
+    parser = argparse.ArgumentParser(description="Configure the server.")
+    parser.add_argument("--hostname"   , type = str, default='localhost', help = "Server hostname (Default: 'localhost').")
+    parser.add_argument("--port"       , type = int, default=5000       , help = "Server port (Default: 5000).")
+    parser.add_argument("--num_workers", type = int, default=5          , help = "Number of workers supporting data serving (Default: 5).")
+    args = parser.parse_args()
+
+    hostname    = args.hostname
+    port        = args.port
+    num_workers = args.num_workers
+
+    server_address = (hostname, port)
     processes, server_socket = start_server(server_address, num_workers)
+
+    print(f"Server is running at {hostname}:{port} with {num_workers} workers.")
 
     try:
         # Wait to complete, join is wait
