@@ -15,6 +15,12 @@ from omegaconf import DictConfig
 
 import ray
 
+def init_psana_check(exp, run, access_mode, detector_name):
+    try:
+        psana_img = PsanaImg(exp, run, access_mode, detector_name)
+    except Exception as e:
+        print(f"Failed to initialize PsanaImg: {e}!!!")
+
 @ray.remote
 def process_batch(exp, run, access_mode, detector_name, events):
     psana_img = PsanaImg(exp, run, access_mode, detector_name)
@@ -31,9 +37,6 @@ def get_psana_events(exp, run, access_mode, detector_name, num_cpus = 2):
 
     batch_futures = [process_batch.remote(exp, run, access_mode, detector_name, batch) for batch in batch_events]
     results = ray.get(batch_futures)
-    ## results = []
-    ## for future in tqdm(ray.get(batch_futures), desc="Processing batches"):
-    ##     results.append(future)
     valid_events = [event for batch in results for event in batch]
 
     ## true_events = [ event for event in tqdm.tqdm(range(num_events)) if psana_img.get(event, None, 'calib') is not None ]
@@ -57,11 +60,11 @@ def get_psana_events(exp, run, access_mode, detector_name, num_cpus = 2):
 
     ray.shutdown()
 
-def worker(exp, run, access_mode, detector_name, num_cpus = 2):
+def run_psana(exp, run, access_mode, detector_name, num_cpus = 2):
     try:
         get_psana_events(exp, run, access_mode, detector_name, num_cpus = num_cpus)
     except Exception as e:
-        print(f"Caught an exception: {e}")
+        print(f"Caught an exception: {e}!!!")
 
 @hydra.main(config_path="config", config_name="base")
 def main(cfg: DictConfig):
@@ -71,12 +74,15 @@ def main(cfg: DictConfig):
     detector_name = cfg.detector_name
     num_cpus      = cfg.num_cpus
 
-    p = multiprocessing.Process(target=worker, args=(exp, run, access_mode, detector_name, num_cpus))
+    p = multiprocessing.Process(target=init_psana_check, args=(exp, run, access_mode, detector_name))
     p.start()
     p.join()
 
     if p.exitcode != 0:
-        print(f"Process terminated with exit code {p.exitcode}")
+        print(f"Process terminated with exit code {p.exitcode}!!!")
+    else:
+        print(f"Psana is lauchable...")
+        run_psana(exp, run, access_mode, detector_name, num_cpus)
 
 if __name__ == "__main__":
     main()
