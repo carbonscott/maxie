@@ -66,7 +66,7 @@ def run_psana(exp, run, access_mode, detector_name, num_cpus = 2):
     except Exception as e:
         print(f"Caught an exception: {e}!!!")
 
-@hydra.main(config_path="config", config_name="base")
+@hydra.main(config_path="config", config_name="base", version_base=None)
 def main(cfg: DictConfig):
     exp           = cfg.exp
     run           = cfg.run
