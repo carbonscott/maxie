@@ -13,7 +13,10 @@ import tqdm
 import hydra
 from omegaconf import DictConfig
 
-import ray
+from joblib import Parallel, delayed
+
+import logging
+logging.basicConfig(level=logging.DEBUG)
 
 def init_psana_check(exp, run, access_mode, detector_name):
     try:
@@ -21,10 +24,9 @@ def init_psana_check(exp, run, access_mode, detector_name):
     except Exception as e:
         print(f"Failed to initialize PsanaImg: {e}!!!")
 
-@ray.remote
 def process_batch(exp, run, access_mode, detector_name, events):
     psana_img = PsanaImg(exp, run, access_mode, detector_name)
-    valid_events = [event for event in tqdm.tqdm(events) if psana_img.get(event, None, 'calib') is not None]
+    valid_events = [event for event in tqdm.tqdm(events) if psana_img.get(event, None, 'raw') is not None]
     return valid_events
 
 def get_psana_events(exp, run, access_mode, detector_name, num_cpus = 2):
@@ -33,10 +35,7 @@ def get_psana_events(exp, run, access_mode, detector_name, num_cpus = 2):
 
     batch_events = split_list_into_chunk(list(range(num_events)), num_cpus)
 
-    ray.init(num_cpus = num_cpus)
-
-    batch_futures = [process_batch.remote(exp, run, access_mode, detector_name, batch) for batch in batch_events]
-    results = ray.get(batch_futures)
+    results = Parallel(n_jobs=num_cpus)(delayed(process_batch)(exp, run, access_mode, detector_name, batch) for batch in batch_events)
     valid_events = [event for batch in results for event in batch]
 
     ## true_events = [ event for event in tqdm.tqdm(range(num_events)) if psana_img.get(event, None, 'calib') is not None ]
@@ -57,8 +56,6 @@ def get_psana_events(exp, run, access_mode, detector_name, num_cpus = 2):
     yaml_data = yaml.dump(output)
     with open(path_output, 'w') as file:
         file.write(yaml_data)
-
-    ray.shutdown()
 
 def run_psana(exp, run, access_mode, detector_name, num_cpus = 2):
     try:
