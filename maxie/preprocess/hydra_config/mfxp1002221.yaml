@@ -1,0 +1,10 @@
+exp: 'mfxp1002221'
+run: 1
+access_mode: 'idx'
+detector_name: 'Rayonix'
+num_cpus: 20
+
+hydra:
+  run:
+    dir: 'outputs/${exp}_${run}'
+

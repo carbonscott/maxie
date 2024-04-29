@@ -1,0 +1,12 @@
+dir_bsub_template : 'bsub_config'
+file_bsub_template: 'template.bsub'
+dir_bsub_jobs     : 'bsub_jobs'
+file_bsub_job     : 'base.bsub'
+qos               : "batch"
+walltime          : "02:00"
+job               : "job_name"
+bsub_num_cpus     : 12
+num_cpus          : 10
+exp               : 'exp_name'
+num_runs          : 71
+detector_name     : 'Rayonix'
