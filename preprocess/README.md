@@ -1,4 +1,4 @@
-### Locate the `preprocess` repository
+### Locate the `preprocess` directory
 
 ```bash
 export MAXIE=<your maxie location>
