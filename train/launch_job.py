@@ -22,6 +22,7 @@ def main(cfg: DictConfig):
     cfg.path.file_bsub_job = f"{job}.bsub"
 
     # -- Yaml
+    os.makedirs(cfg.path.dir_yaml_jobs, exist_ok = True)
     path_yaml = os.path.join(cfg.path.dir_yaml_jobs, cfg.path.file_yaml_job)
     cfg.bsub_config.yaml_config = path_yaml
 
@@ -32,7 +33,6 @@ def main(cfg: DictConfig):
     print(OmegaConf.to_yaml(cfg.train_config))
     print()
 
-    os.makedirs(cfg.path.dir_yaml_jobs, exist_ok = True)
     path_yaml_job = os.path.join(cfg.path.dir_yaml_jobs, cfg.path.file_yaml_job)
     with open(path_yaml_job, 'w') as fh:
         fh.write(OmegaConf.to_yaml(cfg.train_config))

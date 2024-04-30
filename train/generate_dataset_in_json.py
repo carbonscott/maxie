@@ -49,6 +49,7 @@ dataset = [event for batch in results for event in batch]
 
 dataset_train, dataset_eval = split_dataset(dataset, train_frac)
 
+os.makedirs(dir_output, exist_ok=True)
 file_yaml        = os.path.basename(path_yaml)
 dataset_basename = file_yaml[:file_yaml.rfind('.yaml')]
 path_json_train  = os.path.join(dir_output, f"{dataset_basename}.train.json")
