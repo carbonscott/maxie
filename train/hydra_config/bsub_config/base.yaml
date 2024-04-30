@@ -1,0 +1,10 @@
+qos                : "batch"
+walltime           : "12:00"
+job                : "job_name"
+num_nodes          : 100
+num_cpus_for_server: 10
+num_cpus_for_client: 32
+num_gpus_for_client: 6
+trainer            : 'train.fsdp.py'
+yaml_config        : 'base.yaml'
+OMP_NUM_THREADS    : 1
