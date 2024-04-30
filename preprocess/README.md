@@ -1,8 +1,8 @@
-### Locate repository
+### Locate the `preprocess` repository
 
 ```bash
 export MAXIE=<your maxie location>
-export MAXIE_PREPROC="$MAXIE/maxie/preprocess"
+export MAXIE_PREPROC="$MAXIE/preprocess"
 ```
 
 ### Copy configs and python scripts to your working directory
