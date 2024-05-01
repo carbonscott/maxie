@@ -45,6 +45,7 @@ class IPCDistributedSegmentedDatasetConfig:
     is_perf                  : bool = False
     server_address           : Tuple = ('localhost', 5000)
     loads_segment_in_init    : bool = False
+    debug                    : bool = False
 
 class IPCDistributedSegmentedDataset(Dataset):
     """A dataset class designed for fetching and distributing segments of data
@@ -61,6 +62,7 @@ class IPCDistributedSegmentedDataset(Dataset):
         self.transforms                = config.transforms
         self.is_perf                   = config.is_perf
         self.loads_segment_in_init     = config.loads_segment_in_init
+        self.debug                     = config.debug
 
         self.json_entry_list = self._load_json()
         self.total_size      = self._get_total_size()
@@ -116,7 +118,7 @@ class IPCDistributedSegmentedDataset(Dataset):
         self.end_idx   = self.calculate_end_idx()
 
         # Check if we need to reset and/or advance the generator
-        if resumes_from_checkpoint or self.start_idx == 0:
+        if resumes_from_checkpoint or self.start_idx == 0 or self.json_entry_gen is None:
             # Initialize the generator for a resumption or rewind
             json_entry_gen = self._init_entry_generator()
             self.json_entry_gen = islice(json_entry_gen, self.start_idx, None)
@@ -137,9 +139,9 @@ class IPCDistributedSegmentedDataset(Dataset):
         # Fetch event
         image = self.fetch_event(exp, run, access_mode, detector_name, event)    # psana image: (H, W)
 
-        ## # [DEBUG]
-        ## if dist.is_initialized():
-        ##     print(f"[RANK {dist.get_rank()}] exp={exp}, run={run}, detector_name={detector_name}, event={event}.")
+        # [DEBUG]
+        if self.debug:
+            print(f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] exp={exp}, run={run}, detector_name={detector_name}, event={event}.")
 
         # Apply transforms
         image_tensor = None
