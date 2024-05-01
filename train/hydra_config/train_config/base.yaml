@@ -5,12 +5,12 @@ checkpoint:
   path_chkpt_prev    : null
   pretrain           : null
 dataset:
-  batch_size               : 2
-  num_workers              : 2
-  path_train               : experiments/datasets/test.json
-  path_eval                : experiments/datasets/test.json
-  micro_batch_size_per_rank: 200
-  server_address           : [localhost, 5000]
+  batch_size     : 2
+  num_workers    : 2
+  path_train     : experiments/datasets/test.json
+  path_eval      : experiments/datasets/test.json
+  seg_size       : 20
+  server_address : [localhost, 5000]
   transforms:
     H_pad: 2048
     W_pad: 2048
