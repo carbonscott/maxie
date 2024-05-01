@@ -310,7 +310,7 @@ ipc_dataset_eval_config = IPCDistributedSegmentedDatasetConfig(
     world_size                = dist_world_size,
     transforms                = transforms,
     is_perf                   = True,
-    server_address            = server_address,
+    server_address            = tuple(server_address),
     loads_segment_in_init     = False,
 )
 dataset_eval_val = IPCDistributedSegmentedDataset(ipc_dataset_eval_config)
@@ -522,7 +522,6 @@ try:
         # -- Train on one segment
         seg_pbar = tqdm.tqdm(total = dataset_train.num_seg, initial = 0, desc = f'[RANK {dist_rank}] Segment')
         micro_batch = 0
-        batch_idx = 0
 
         # Reset everything for a new epoch if not from a resume
         if not from_resume:
@@ -600,7 +599,7 @@ try:
                 # Get a random subset of the training set
                 dataset_eval_train.reset()
                 high_seg_idx = dataset_eval_train.total_size - micro_batch_size_per_rank * dist_world_size
-                rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,))
+                rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
                 dataset_eval_train.set_start_idx(rand_start_idx)
 
                 sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_train, shuffle=True)
@@ -617,7 +616,7 @@ try:
                 # Get a random subset of the validation set
                 dataset_eval_val.reset()
                 high_seg_idx = dataset_eval_val.total_size - micro_batch_size_per_rank * dist_world_size
-                rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,))
+                rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
                 dataset_eval_val.set_start_idx(rand_start_idx)
 
                 sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_val, shuffle=True)
