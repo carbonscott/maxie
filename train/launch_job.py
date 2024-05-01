@@ -20,6 +20,7 @@ def main(cfg: DictConfig):
     # -- Job
     cfg.path.file_yaml_job = f"{job}.yaml"
     cfg.path.file_bsub_job = f"{job}.bsub"
+    cfg.bsub_config.job    = cfg.job
 
     # -- Yaml
     os.makedirs(cfg.path.dir_yaml_jobs, exist_ok = True)
