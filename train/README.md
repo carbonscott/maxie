@@ -38,7 +38,7 @@ python generate_dataset_in_json.py --yaml $PROJ_MAXIE_TRAIN/dataset.yaml --num_c
 ### Launch a job
 
 ```bash
-python launch_job.py train_config.dataset.path_train=$MAXIE_TRAIN/experiments/datasets/dataset.train.json train_config.dataset.path_eval=$MAXIE_TRAIN/experiments/datasets/dataset.eval.json train_config.misc.num_gpus=6 train_config.misc.num_nodes=45 train_config.model.name=facebook/vit-mae-huge job=debug bsub_config.qos=debug bsub_config.walltime="2:00" auto_submit=false
+python launch_job.py train_config.dataset.path_train=experiments/datasets/dataset.train.json train_config.dataset.path_eval=experiments/datasets/dataset.eval.json train_config.misc.num_gpus=6 train_config.misc.num_nodes=45 train_config.model.name=facebook/vit-mae-huge train_config.dataset.seg_size=10 job=my_job bsub_config.ipc_workers=2 bsub_config.qos=debug bsub_config.walltime=2:00 bsub_config.num_nodes=45 auto_submit=true
 ```
 
 This should generate a yaml at `$MAXIE_TRAIN/experiments/yaml/my_job.yaml` and a
