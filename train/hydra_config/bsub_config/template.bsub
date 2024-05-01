@@ -39,7 +39,7 @@ jsrun \
 --rs_per_host 1 \
 --latency_priority cpu-cpu \
 --launch_distribution packed \
-python server.ipc.py &
+python server.ipc.py --num_workers {{ ipc_workers }} &
 
 sleep 10
 
