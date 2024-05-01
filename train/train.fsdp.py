@@ -103,24 +103,24 @@ path_chkpt_prev     = chkpt_config.get("path_chkpt_prev")
 chkpt_saving_period = chkpt_config.get("chkpt_saving_period")
 
 # -- Dataset
-dataset_config            = config.get("dataset")
-path_train_json           = dataset_config.get("path_train")
-path_eval_json            = dataset_config.get("path_eval")
-batch_size                = dataset_config.get("batch_size")
-num_workers               = dataset_config.get("num_workers")
-micro_batch_size_per_rank = dataset_config.get("micro_batch_size_per_rank")
-server_address            = dataset_config.get("server_address")
-transforms_config         = dataset_config.get("transforms")
-num_patch                 = transforms_config.get("num_patch")
-size_patch                = transforms_config.get("size_patch")
-frac_shift_max            = transforms_config.get("frac_shift_max")
-angle_max                 = transforms_config.get("angle_max")
-var_size_patch            = transforms_config.get("var_size_patch")
-downscale_factors         = transforms_config.get("downscale_factors")
-H_pad                     = transforms_config.get("H_pad")
-W_pad                     = transforms_config.get("W_pad")
-patch_size                = transforms_config.get("patch_size")
-stride                    = transforms_config.get("stride")
+dataset_config    = config.get("dataset")
+path_train_json   = dataset_config.get("path_train")
+path_eval_json    = dataset_config.get("path_eval")
+batch_size        = dataset_config.get("batch_size")
+num_workers       = dataset_config.get("num_workers")
+seg_size          = dataset_config.get("seg_size")
+server_address    = dataset_config.get("server_address")
+transforms_config = dataset_config.get("transforms")
+num_patch         = transforms_config.get("num_patch")
+size_patch        = transforms_config.get("size_patch")
+frac_shift_max    = transforms_config.get("frac_shift_max")
+angle_max         = transforms_config.get("angle_max")
+var_size_patch    = transforms_config.get("var_size_patch")
+downscale_factors = transforms_config.get("downscale_factors")
+H_pad             = transforms_config.get("H_pad")
+W_pad             = transforms_config.get("W_pad")
+patch_size        = transforms_config.get("patch_size")
+stride            = transforms_config.get("stride")
 
 # -- Model
 model_params = config.get("model")
@@ -289,13 +289,13 @@ transforms = (
 
 # -- Set up training set
 ipc_dataset_train_config = IPCDistributedSegmentedDatasetConfig(
-    path_json                 = path_train_json,
-    micro_batch_size_per_rank = micro_batch_size_per_rank,
-    world_size                = dist_world_size,
-    transforms                = transforms,
-    is_perf                   = True,
-    server_address            = tuple(server_address),
-    loads_segment_in_init     = False,
+    path_json             = path_train_json,
+    seg_size              = seg_size,
+    world_size            = dist_world_size,
+    transforms            = transforms,
+    is_perf               = True,
+    server_address        = tuple(server_address),
+    loads_segment_in_init = False,
 )
 dataset_train = IPCDistributedSegmentedDataset(ipc_dataset_train_config)
 
@@ -305,13 +305,13 @@ dataset_eval_train = IPCDistributedSegmentedDataset(ipc_dataset_train_config)
 
 # --- For val loss
 ipc_dataset_eval_config = IPCDistributedSegmentedDatasetConfig(
-    path_json                 = path_eval_json,
-    micro_batch_size_per_rank = micro_batch_size_per_rank,
-    world_size                = dist_world_size,
-    transforms                = transforms,
-    is_perf                   = True,
-    server_address            = tuple(server_address),
-    loads_segment_in_init     = False,
+    path_json             = path_eval_json,
+    seg_size              = seg_size,
+    world_size            = dist_world_size,
+    transforms            = transforms,
+    is_perf               = True,
+    server_address        = tuple(server_address),
+    loads_segment_in_init = False,
 )
 dataset_eval_val = IPCDistributedSegmentedDataset(ipc_dataset_eval_config)
 
@@ -598,7 +598,7 @@ try:
                 # --- Train
                 # Get a random subset of the training set
                 dataset_eval_train.reset()
-                high_seg_idx = dataset_eval_train.total_size - micro_batch_size_per_rank * dist_world_size
+                high_seg_idx = dataset_eval_train.total_size - seg_size * dist_world_size
                 rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
                 dataset_eval_train.set_start_idx(rand_start_idx)
 
@@ -615,7 +615,7 @@ try:
                 # --- Validation
                 # Get a random subset of the validation set
                 dataset_eval_val.reset()
-                high_seg_idx = dataset_eval_val.total_size - micro_batch_size_per_rank * dist_world_size
+                high_seg_idx = dataset_eval_val.total_size - seg_size * dist_world_size
                 rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
                 dataset_eval_val.set_start_idx(rand_start_idx)
 
