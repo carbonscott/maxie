@@ -30,22 +30,22 @@ class IPCDistributedSegmentedDatasetConfig:
     """Configuration for the Remote Distributed Segmented Dataset.
 
     Attributes:
-        path_json (str): JSON file to configure the dataset list.
-        micro_batch_size_per_rank (int): The size of each micro-batch to be processed by each rank.
-        world_size (int): Total number of distributed processes (ranks) in use.
-        transforms (List): A list of transformations to apply to each data item.
-        is_perf (bool): Flag to enable performance timing for transformations. Default is False.
-        server_address (str): URL of the server to fetch data from. Defaults to 'http://localhost:5001'.
+        path_json (str)              : JSON file to configure the dataset list.
+        seg_size (int)               : The segment size by each rank.
+        world_size (int)             : Total number of distributed processes (ranks) in use.
+        transforms (List)            : A list of transformations to apply to each data item.
+        is_perf (bool)               : Flag to enable performance timing for transformations. Default is False.
+        server_address (str)         : URL of the server to fetch data from. Defaults to 'http://localhost:5001'.
         loads_segment_in_init (bool) : Whether to load the first segment in the init.
     """
-    path_json                : str
-    micro_batch_size_per_rank: int
-    world_size               : int
-    transforms               : List
-    is_perf                  : bool = False
-    server_address           : Tuple = ('localhost', 5000)
-    loads_segment_in_init    : bool = False
-    debug                    : bool = False
+    path_json             : str
+    seg_size              : int
+    world_size            : int
+    transforms            : List
+    is_perf               : bool = False
+    server_address        : Tuple = ('localhost', 5000)
+    loads_segment_in_init : bool = False
+    debug                 : bool = False
 
 class IPCDistributedSegmentedDataset(Dataset):
     """A dataset class designed for fetching and distributing segments of data
@@ -55,14 +55,14 @@ class IPCDistributedSegmentedDataset(Dataset):
     distributed processes.
     """
     def __init__(self, config: IPCDistributedSegmentedDatasetConfig):
-        self.path_json                 = config.path_json
-        self.micro_batch_size_per_rank = config.micro_batch_size_per_rank
-        self.world_size                = config.world_size
-        self.server_address            = config.server_address
-        self.transforms                = config.transforms
-        self.is_perf                   = config.is_perf
-        self.loads_segment_in_init     = config.loads_segment_in_init
-        self.debug                     = config.debug
+        self.path_json             = config.path_json
+        self.seg_size              = config.seg_size
+        self.world_size            = config.world_size
+        self.server_address        = config.server_address
+        self.transforms            = config.transforms
+        self.is_perf               = config.is_perf
+        self.loads_segment_in_init = config.loads_segment_in_init
+        self.debug                 = config.debug
 
         self.json_entry_list = self._load_json()
         self.total_size      = self._get_total_size()
@@ -103,11 +103,11 @@ class IPCDistributedSegmentedDataset(Dataset):
 
     def calculate_end_idx(self):
         # Calculate and return the end index for the current dataset segment.
-        return min(self.start_idx + self.micro_batch_size_per_rank * self.world_size, self.total_size)
+        return min(self.start_idx + self.seg_size * self.world_size, self.total_size)
 
     @property
     def num_seg(self):
-        return ceil(self.total_size / (self.micro_batch_size_per_rank * self.world_size))
+        return ceil(self.total_size / (self.seg_size * self.world_size))
 
     def update_dataset_segment(self):
         # Trick islice to return a subset of events at a time
@@ -156,8 +156,8 @@ class IPCDistributedSegmentedDataset(Dataset):
     def save_checkpoint(self, checkpoint_path, rank):
         if rank == 0:
             checkpoint = {
-                'end_idx'                  : self.end_idx,
-                'micro_batch_size_per_rank': self.micro_batch_size_per_rank
+                'end_idx' : self.end_idx,
+                'seg_size': self.seg_size
             }
             torch.save(checkpoint, checkpoint_path)
         if dist.is_initialized():
@@ -171,9 +171,9 @@ class IPCDistributedSegmentedDataset(Dataset):
 
         if checkpoint:
             self.set_start_idx(checkpoint.get('end_idx', 0))
-            if 'micro_batch_size_per_rank' in checkpoint and checkpoint['micro_batch_size_per_rank'] != self.micro_batch_size_per_rank:
-                warnings.warn(f"micro_batch_size_per_rank has been changed from {checkpoint['micro_batch_size_per_rank']} to {self.micro_batch_size_per_rank}. Resetting to {checkpoint['micro_batch_size_per_rank']}.")
-                self.micro_batch_size_per_rank = checkpoint['micro_batch_size_per_rank']
+            if 'seg_size' in checkpoint and checkpoint['seg_size'] != self.seg_size:
+                warnings.warn(f"seg_size has been changed from {checkpoint['seg_size']} to {self.seg_size}. Resetting to {checkpoint['seg_size']}.")
+                self.seg_size = checkpoint['seg_size']
 
         if dist.is_initialized():
             dist.barrier()
