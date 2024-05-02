@@ -618,7 +618,6 @@ try:
                 # Get loss
                 train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device)
 
-
                 # --- Validation
                 # Get a random subset of the validation set
                 dataset_eval_val.reset()
@@ -628,10 +627,11 @@ try:
 
                 sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_val, shuffle=True)
                 dataloader_eval = torch.utils.data.DataLoader(dataset_eval_val, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
-                validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device)
 
-                # Shuffle the training example
+                # Shuffle the validation example
                 sampler_eval.set_epoch(0)
+
+                validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device)
 
                 # -- Save checkpoint
                 if validate_loss < loss_min:
