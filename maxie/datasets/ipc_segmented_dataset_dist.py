@@ -199,6 +199,7 @@ class IPCDistributedSegmentedDataset(Dataset):
             response_data = sock.recv(4096).decode('utf-8')
 
             # Process response with a non-empty string
+            result = None
             if len(response_data):
                 # Load the reponse data
                 response_json = json.loads(response_data)
