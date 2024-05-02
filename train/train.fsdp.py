@@ -13,7 +13,6 @@ import traceback
 from functools  import partial
 from contextlib import nullcontext
 from datetime   import timedelta
-from itertools  import islice
 
 # -- maxie specific imports
 from maxie.datasets.ipc_segmented_dataset_dist import IPCDistributedSegmentedDatasetConfig, IPCDistributedSegmentedDataset, IPCDatasetConfig, IPCDataset
