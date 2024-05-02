@@ -8,10 +8,12 @@ import tqdm
 import signal
 import argparse
 import logging
+import traceback
 
-from functools import partial
+from functools  import partial
 from contextlib import nullcontext
-from datetime import timedelta
+from datetime   import timedelta
+from itertools  import islice
 
 # -- maxie specific imports
 from maxie.datasets.ipc_segmented_dataset_dist import IPCDistributedSegmentedDatasetConfig, IPCDistributedSegmentedDataset, IPCDatasetConfig, IPCDataset
@@ -475,8 +477,10 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
 
     losses      = torch.zeros(len(dataloader), device = device)
     num_samples = torch.zeros(len(dataloader), device = device)
+    masks       = torch.zeros(len(dataloader), device = device)
     for enum_idx, batch_data in tqdm.tqdm(enumerate(dataloader), total = max_iter, desc = f'[RANK {dist_rank}] Eval{desc}'):    # (B, C, H, W)
-        if enum_idx + 1 > max_iter: break
+        # Sample at most max_iter batches
+        if enum_idx >= max_iter: break
 
         ## print("Pre fetching")
 
@@ -497,9 +501,10 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
 
         losses[enum_idx]      = loss
         num_samples[enum_idx] = len(batch_input)
+        masks[enum_idx]       = 1
 
-    losses_sum      = torch.dot(losses[losses > 0], num_samples[num_samples > 0])  # [WORKAROUND] Need a proper logic to filter out None events
-    num_samples_sum = num_samples[num_samples > 0].sum()
+    losses_sum      = torch.dot(losses[masks > 0], num_samples[masks > 0])  # [WORKAROUND] Need a proper logic to filter out None events
+    num_samples_sum = num_samples[masks > 0].sum()
 
     world_losses_sum      = [ torch.tensor(0.0).to(device) for _ in range(dist_world_size) ]
     world_num_samples_sum = [ torch.tensor(0.0).to(device) for _ in range(dist_world_size) ]
@@ -613,7 +618,7 @@ try:
                 dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
 
                 # Shuffle the training example
-                sampler_eval.set_epoch(0)
+                sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
                 # Get loss
                 train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device)
@@ -629,7 +634,7 @@ try:
                 dataloader_eval = torch.utils.data.DataLoader(dataset_eval_val, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
 
                 # Shuffle the validation example
-                sampler_eval.set_epoch(0)
+                sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
                 validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device)
 
@@ -667,7 +672,8 @@ try:
 except KeyboardInterrupt:
     print(f"FSDP RANK {dist_rank}: Training was interrupted!")
 except Exception as e:
-    print(f"FSDP RANK {dist_rank}: Error occurred: {e}")
+    tb = traceback.format_exc()
+    print(f"FSDP RANK {dist_rank}: Error occurred: {e}\nTraceback: {tb}")
 finally:
     # Ensure that the process group is always destroyed
     if dist.is_initialized():
