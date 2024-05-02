@@ -129,7 +129,7 @@ model_name   = model_params.get("name")
 
 # -- Loss
 loss_config      = config.get("loss")
-grad_accum_steps = min(loss_config.get("grad_accum_steps"), 1)
+grad_accum_steps = max(loss_config.get("grad_accum_steps"), 1)
 
 # -- Optimizer
 optim_config = config.get("optim")
@@ -158,7 +158,6 @@ fl_log_prefix = logging_config.get("filename_prefix")
 
 # -- Misc
 misc_config = config.get("misc")
-uses_mixed_precision = misc_config.get("uses_mixed_precision")
 max_epochs           = misc_config.get("max_epochs")
 max_eval_iter        = misc_config.get("max_eval_iter")
 num_gpus             = misc_config.get("num_gpus")
@@ -571,6 +570,10 @@ try:
                         loss = batch_output.loss  # Refer to https://github.com/huggingface/transformers/blob/e34da3ee3c9d2d628fdbeb60cee45c4f8f32945a/src/transformers/models/vit_mae/modeling_vit_mae.py#L1001
                         loss = loss / grad_accum_steps  # scale the loss to account for gradient accumulation
 
+                    # Log the training loop loss
+                    if dist_rank == 0:
+                        logger.info(f"[RANK {dist_rank}] LOSS:TRAIN - epoch {epoch}, micro_batch {micro_batch}, mean train loss = {loss:.8f}")
+
                     # Backward
                     # Turn off grad sync for every batch to simulate a larger batch size
                     with no_grad_sync_context:
@@ -622,6 +625,10 @@ try:
                 # Get loss
                 train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device)
 
+                # Log the train loss
+                if dist_rank == 0:
+                    logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, micro_batch {micro_batch}, mean train loss = {train_loss:.8f}")
+
                 # --- Validation
                 # Get a random subset of the validation set
                 dataset_eval_val.reset()
@@ -636,6 +643,10 @@ try:
                 sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
                 validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device)
+
+                # Log the validation loss
+                if dist_rank == 0:
+                    logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, micro_batch {micro_batch}, mean validation loss = {validate_loss:.8f}")
 
                 # -- Save checkpoint
                 if validate_loss < loss_min:
