@@ -146,12 +146,14 @@ class IPCDistributedSegmentedDataset(Dataset):
         # Apply transforms
         image_tensor = None
         if image is not None and self.transforms is not None:
-            image_tensor = torch.from_numpy(image[None, None])    # (B=1, C, H, W)
+            image_tensor = torch.from_numpy(image[None, None])  # (B=1, C, H, W)
             for enum_idx, trans in enumerate(self.transforms):
                 with Timer(tag = None, is_on = self.is_perf):
                     image_tensor = trans(image_tensor)
+            B, N, C, H, W = image_tensor.shape    # (B=1, num_patches, C, patch_size, patch_size)
+            image_tensor = image_tensor.view(B*N, C, H, W)
 
-        return image_tensor[0]    # Dataloader only wants data with shape of (C, H, W)
+        return image_tensor
 
     def save_checkpoint(self, checkpoint_path, rank):
         if rank == 0:
@@ -195,27 +197,31 @@ class IPCDistributedSegmentedDataset(Dataset):
 
             # Receive and process response
             response_data = sock.recv(4096).decode('utf-8')
-            response_json = json.loads(response_data)
 
-            # Use the JSON data to access the shared memory
-            shm_name = response_json['name']
-            shape    = response_json['shape']
-            dtype    = np.dtype(response_json['dtype'])
+            # Process response with a non-empty string
+            if len(response_data):
+                # Load the reponse data
+                response_json = json.loads(response_data)
 
-            # Initialize shared memory outside of try block to ensure it's in scope for finally block
-            shm = None
-            try:
-                # Access the shared memory
-                shm = shared_memory.SharedMemory(name=shm_name)
-                data_array = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+                # Use the JSON data to access the shared memory
+                shm_name = response_json['name']
+                shape    = response_json['shape']
+                dtype    = np.dtype(response_json['dtype'])
 
-                # Convert to numpy array (this creates a copy of the data)
-                result = np.array(data_array)
-            finally:
-                # Ensure shared memory is closed even if an exception occurs
-                if shm:
-                    shm.close()
-                    shm.unlink()
+                # Initialize shared memory outside of try block to ensure it's in scope for finally block
+                shm = None
+                try:
+                    # Access the shared memory
+                    shm = shared_memory.SharedMemory(name=shm_name)
+                    data_array = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+
+                    # Convert to numpy array (this creates a copy of the data)
+                    result = np.array(data_array)
+                finally:
+                    # Ensure shared memory is closed even if an exception occurs
+                    if shm:
+                        shm.close()
+                        shm.unlink()
 
             # Send acknowledgment after successfully accessing shared memory
             sock.sendall("ACK".encode('utf-8'))

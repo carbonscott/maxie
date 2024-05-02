@@ -316,7 +316,10 @@ ipc_dataset_eval_config = IPCDistributedSegmentedDatasetConfig(
 dataset_eval_val = IPCDistributedSegmentedDataset(ipc_dataset_eval_config)
 
 # -- Custom collate to merge patch and batch dimension using concatenation
-custom_collate = lambda batch: torch.cat(batch, dim=0)  # batch of [N, C, H, W] -> [B * N, C, H, W]
+## custom_collate = lambda batch: torch.cat(batch, dim=0)  # batch of [N, C, H, W] -> [B * N, C, H, W]
+def custom_collate(batch):
+    batch_filtered = [x for x in batch if x is not None]
+    return torch.cat(batch_filtered, dim=0) if len(batch_filtered) else None
 
 # ----------------------------------------------------------------------- #
 #  MODEL
@@ -477,6 +480,9 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
 
         ## print("Pre fetching")
 
+        # Skip a batch if it's a None
+        if batch_data is None: continue
+
         batch_input = batch_data
         batch_input = batch_input.to(device, non_blocking = True)
 
@@ -492,8 +498,8 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         losses[enum_idx]      = loss
         num_samples[enum_idx] = len(batch_input)
 
-    losses_sum      = torch.dot(losses, num_samples)
-    num_samples_sum = losses_sum.sum()
+    losses_sum      = torch.dot(losses[losses > 0], num_samples[num_samples > 0])  # [WORKAROUND] Need a proper logic to filter out None events
+    num_samples_sum = num_samples[num_samples > 0].sum()
 
     world_losses_sum      = [ torch.tensor(0.0).to(device) for _ in range(dist_world_size) ]
     world_num_samples_sum = [ torch.tensor(0.0).to(device) for _ in range(dist_world_size) ]
@@ -551,22 +557,23 @@ try:
             # -- Train one mini batch
             grad_accum_counter = 0
             for batch_idx, batch_data in tqdm.tqdm(enumerate(dataloader), total = len(dataloader), desc = f'[RANK {dist_rank}] Mini batch'):    # (B, C, H, W)
-                batch_input = batch_data
-                batch_input = batch_input.to(device, non_blocking = True)
+                if batch_data is not None:
+                    batch_input = batch_data
+                    batch_input = batch_input.to(device, non_blocking = True)
 
-                # Forward
-                with autocast_context:
-                    batch_output = model(batch_input)
-                    loss = batch_output.loss  # Refer to https://github.com/huggingface/transformers/blob/e34da3ee3c9d2d628fdbeb60cee45c4f8f32945a/src/transformers/models/vit_mae/modeling_vit_mae.py#L1001
-                    loss = loss / grad_accum_steps  # scale the loss to account for gradient accumulation
+                    # Forward
+                    with autocast_context:
+                        batch_output = model(batch_input)
+                        loss = batch_output.loss  # Refer to https://github.com/huggingface/transformers/blob/e34da3ee3c9d2d628fdbeb60cee45c4f8f32945a/src/transformers/models/vit_mae/modeling_vit_mae.py#L1001
+                        loss = loss / grad_accum_steps  # scale the loss to account for gradient accumulation
 
-                # Backward
-                # Turn off grad sync for every batch to simulate a larger batch size
-                with no_grad_sync_context:
-                    scaler.scale(loss).backward()
+                    # Backward
+                    # Turn off grad sync for every batch to simulate a larger batch size
+                    with no_grad_sync_context:
+                        scaler.scale(loss).backward()
 
-                # Increment the grad accum counter
-                grad_accum_counter += 1
+                    # Increment the grad accum counter
+                    grad_accum_counter += 1
 
                 # Conditional parameter updates either when it's due or the last batch
                 if is_action_due(grad_accum_counter, grad_accum_steps) or is_last_batch(batch_idx, len(dataloader)):
