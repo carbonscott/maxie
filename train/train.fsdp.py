@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+# -- OLCF specific imports
+from maxie.plugins.olcf import init_dist_env_on_summit
+
 # -- Basic imports
 import os
 import yaml
@@ -179,6 +182,12 @@ signal.signal(signal.SIGTERM, signal_handler)
 #  DIST SETUP
 # ----------------------------------------------------------------------- #
 # -- DIST init
+# --- OLCF specific env
+# torchrun doesn't work well on OLCF.  Refer to https://docs.olcf.ornl.gov/software/python/pytorch_frontier.html#torchrun
+# Thanks to the suggestion by @frobnitzem
+torchrun_exists = int(os.environ.get("RANK", -1)) != -1
+if not torchrun_exists: init_dist_env_on_summit()
+
 # --- Initialize distributed environment
 uses_dist = int(os.environ.get("RANK", -1)) != -1
 if uses_dist:
@@ -188,7 +197,7 @@ if uses_dist:
     dist.init_process_group(backend     = dist_backend,
                             rank        = dist_rank,
                             world_size  = dist_world_size,
-                            timeout     = timedelta(seconds=900),
+                            timeout     = timedelta(seconds=1800),
                             init_method = "env://",)
     print(f"RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
 else:
@@ -198,7 +207,8 @@ else:
     print(f"NO FSDP is used.  RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
 
 # --- Set up GPU device
-device = f'cuda:{dist_local_rank}' if torch.cuda.is_available() else 'cpu'
+gpu_idx = dist_local_rank % torch.cuda.device_count()    # dist_local_rank is node-centric, whereas torch.cuda.device_count() is resource-centeric (on LSF)
+device = f'cuda:{gpu_idx}' if torch.cuda.is_available() else 'cpu'
 if device != 'cpu': torch.cuda.set_device(device)
 seed_offset = dist_rank if uses_unique_world_seed else 0
 
