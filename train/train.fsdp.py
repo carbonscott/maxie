@@ -132,7 +132,7 @@ model_name   = model_params.get("name")
 
 # -- Loss
 loss_config      = config.get("loss")
-grad_accum_steps = max(loss_config.get("grad_accum_steps"), 1)
+grad_accum_steps = max(int(loss_config.get("grad_accum_steps")), 1)
 
 # -- Optimizer
 optim_config = config.get("optim")
