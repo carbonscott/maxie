@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+# -- OLCF specific imports
+from maxie.plugins.olcf import init_dist_env_on_summit
+
 # -- Basic imports
 import os
 import yaml
@@ -8,10 +11,11 @@ import tqdm
 import signal
 import argparse
 import logging
+import traceback
 
-from functools import partial
+from functools  import partial
 from contextlib import nullcontext
-from datetime import timedelta
+from datetime   import timedelta
 
 # -- maxie specific imports
 from maxie.datasets.ipc_segmented_dataset_dist import IPCDistributedSegmentedDatasetConfig, IPCDistributedSegmentedDataset, IPCDatasetConfig, IPCDataset
@@ -128,7 +132,7 @@ model_name   = model_params.get("name")
 
 # -- Loss
 loss_config      = config.get("loss")
-grad_accum_steps = min(loss_config.get("grad_accum_steps"), 1)
+grad_accum_steps = max(int(loss_config.get("grad_accum_steps")), 1)
 
 # -- Optimizer
 optim_config = config.get("optim")
@@ -157,7 +161,6 @@ fl_log_prefix = logging_config.get("filename_prefix")
 
 # -- Misc
 misc_config = config.get("misc")
-uses_mixed_precision = misc_config.get("uses_mixed_precision")
 max_epochs           = misc_config.get("max_epochs")
 max_eval_iter        = misc_config.get("max_eval_iter")
 num_gpus             = misc_config.get("num_gpus")
@@ -179,6 +182,12 @@ signal.signal(signal.SIGTERM, signal_handler)
 #  DIST SETUP
 # ----------------------------------------------------------------------- #
 # -- DIST init
+# --- OLCF specific env
+# torchrun doesn't work well on OLCF.  Refer to https://docs.olcf.ornl.gov/software/python/pytorch_frontier.html#torchrun
+# Thanks to the suggestion by @frobnitzem
+torchrun_exists = int(os.environ.get("RANK", -1)) != -1
+if not torchrun_exists: init_dist_env_on_summit()
+
 # --- Initialize distributed environment
 uses_dist = int(os.environ.get("RANK", -1)) != -1
 if uses_dist:
@@ -188,7 +197,7 @@ if uses_dist:
     dist.init_process_group(backend     = dist_backend,
                             rank        = dist_rank,
                             world_size  = dist_world_size,
-                            timeout     = timedelta(seconds=900),
+                            timeout     = timedelta(seconds=1800),
                             init_method = "env://",)
     print(f"RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
 else:
@@ -198,7 +207,8 @@ else:
     print(f"NO FSDP is used.  RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
 
 # --- Set up GPU device
-device = f'cuda:{dist_local_rank}' if torch.cuda.is_available() else 'cpu'
+gpu_idx = dist_local_rank % torch.cuda.device_count()    # dist_local_rank is node-centric, whereas torch.cuda.device_count() is resource-centeric (on LSF)
+device = f'cuda:{gpu_idx}' if torch.cuda.is_available() else 'cpu'
 if device != 'cpu': torch.cuda.set_device(device)
 seed_offset = dist_rank if uses_unique_world_seed else 0
 
@@ -379,8 +389,9 @@ if uses_dist:
 
     dist.barrier()
 
-# -- Optional grad sync off
-no_grad_sync_context = model.no_sync() if grad_accum_steps > 1 else nullcontext()
+# -- Optional grad sync off (to allow grad accumulation)
+grad_sync_context = lambda enables_sync: nullcontext() if enables_sync else model.no_sync()
+
 
 # -- [TODO] Apply activation checkpointing
 ac_layer = None
@@ -475,8 +486,10 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
 
     losses      = torch.zeros(len(dataloader), device = device)
     num_samples = torch.zeros(len(dataloader), device = device)
+    masks       = torch.zeros(len(dataloader), device = device)
     for enum_idx, batch_data in tqdm.tqdm(enumerate(dataloader), total = max_iter, desc = f'[RANK {dist_rank}] Eval{desc}'):    # (B, C, H, W)
-        if enum_idx + 1 > max_iter: break
+        # Sample at most max_iter batches
+        if enum_idx >= max_iter: break
 
         ## print("Pre fetching")
 
@@ -497,9 +510,10 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
 
         losses[enum_idx]      = loss
         num_samples[enum_idx] = len(batch_input)
+        masks[enum_idx]       = 1
 
-    losses_sum      = torch.dot(losses[losses > 0], num_samples[num_samples > 0])  # [WORKAROUND] Need a proper logic to filter out None events
-    num_samples_sum = num_samples[num_samples > 0].sum()
+    losses_sum      = torch.dot(losses[masks > 0], num_samples[masks > 0])  # [WORKAROUND] Need a proper logic to filter out None events
+    num_samples_sum = num_samples[masks > 0].sum()
 
     world_losses_sum      = [ torch.tensor(0.0).to(device) for _ in range(dist_world_size) ]
     world_num_samples_sum = [ torch.tensor(0.0).to(device) for _ in range(dist_world_size) ]
@@ -555,28 +569,31 @@ try:
             sampler.set_epoch(epoch)
 
             # -- Train one mini batch
-            grad_accum_counter = 0
+            grad_nosync_counter = 0
             for batch_idx, batch_data in tqdm.tqdm(enumerate(dataloader), total = len(dataloader), desc = f'[RANK {dist_rank}] Mini batch'):    # (B, C, H, W)
                 if batch_data is not None:
                     batch_input = batch_data
                     batch_input = batch_input.to(device, non_blocking = True)
 
-                    # Forward
-                    with autocast_context:
-                        batch_output = model(batch_input)
-                        loss = batch_output.loss  # Refer to https://github.com/huggingface/transformers/blob/e34da3ee3c9d2d628fdbeb60cee45c4f8f32945a/src/transformers/models/vit_mae/modeling_vit_mae.py#L1001
-                        loss = loss / grad_accum_steps  # scale the loss to account for gradient accumulation
+                    # Conditionally turn off grad sync for grad accumulation to simulate a larger batch unless the sync is due or the last batch
+                    # Refer to https://github.com/pytorch/pytorch/blob/6c4f43f82675b5fcfe8cf3e5983d0c0f326408aa/test/distributed/fsdp/test_fsdp_grad_acc.py#L180
+                    is_grad_sync_required = is_last_batch(batch_idx, len(dataloader)) or is_action_due(grad_nosync_counter, grad_accum_steps)
+                    with grad_sync_context(is_grad_sync_required):
+                        # Forward
+                        with autocast_context:
+                            batch_output = model(batch_input)
+                            loss = batch_output.loss  # Refer to https://github.com/huggingface/transformers/blob/e34da3ee3c9d2d628fdbeb60cee45c4f8f32945a/src/transformers/models/vit_mae/modeling_vit_mae.py#L1001
+                            loss = loss / grad_accum_steps  # scale the loss to account for gradient accumulation
 
-                    # Backward
-                    # Turn off grad sync for every batch to simulate a larger batch size
-                    with no_grad_sync_context:
+                        # Log the training loop loss
+                        if dist_rank == 0:
+                            logger.info(f"[RANK {dist_rank}] LOSS:TRAIN - epoch {epoch}, micro_batch {micro_batch}, mean train loss = {loss:.8f}")
+
+                        # Backward
                         scaler.scale(loss).backward()
 
-                    # Increment the grad accum counter
-                    grad_accum_counter += 1
-
-                # Conditional parameter updates either when it's due or the last batch
-                if is_action_due(grad_accum_counter, grad_accum_steps) or is_last_batch(batch_idx, len(dataloader)):
+                # Conditional parameter updates either when grad sync is required
+                if is_grad_sync_required:
                     # Grad clipping
                     if grad_clip != 0.0:
                         scaler.unscale_(optimizer)
@@ -590,11 +607,10 @@ try:
                     optimizer.zero_grad(set_to_none=True)
 
                     # Reset grad accum counter
-                    grad_accum_counter = 0
+                    grad_nosync_counter = 0
 
-            # Track and update micro batch for conditional logging and eval
-            micro_batch += 1
-            seg_pbar.update(1)
+                # Increment the grad accum counter
+                grad_nosync_counter += 1
 
             # -- Eval and checkpointing
             # Rank0 performs evaluation and decide if a sharded state dict should be saved
@@ -613,10 +629,14 @@ try:
                 dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
 
                 # Shuffle the training example
-                sampler_eval.set_epoch(0)
+                sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
                 # Get loss
                 train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device)
+
+                # Log the train loss
+                if dist_rank == 0:
+                    logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, micro_batch {micro_batch}, mean train loss = {train_loss:.8f}")
 
                 # --- Validation
                 # Get a random subset of the validation set
@@ -629,9 +649,13 @@ try:
                 dataloader_eval = torch.utils.data.DataLoader(dataset_eval_val, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
 
                 # Shuffle the validation example
-                sampler_eval.set_epoch(0)
+                sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
                 validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device)
+
+                # Log the validation loss
+                if dist_rank == 0:
+                    logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, micro_batch {micro_batch}, mean validation loss = {validate_loss:.8f}")
 
                 # -- Save checkpoint
                 if validate_loss < loss_min:
@@ -650,6 +674,10 @@ try:
             # -- Update lr after one iteration
             scheduler.step()
 
+            # Track and update micro batch for conditional logging and eval
+            micro_batch += 1
+            seg_pbar.update(1)
+
             # [PERFORMANCE]
             if dist_local_rank == 0:
                 memmax.update()
@@ -667,7 +695,8 @@ try:
 except KeyboardInterrupt:
     print(f"FSDP RANK {dist_rank}: Training was interrupted!")
 except Exception as e:
-    print(f"FSDP RANK {dist_rank}: Error occurred: {e}")
+    tb = traceback.format_exc()
+    print(f"FSDP RANK {dist_rank}: Error occurred: {e}\nTraceback: {tb}")
 finally:
     # Ensure that the process group is always destroyed
     if dist.is_initialized():
