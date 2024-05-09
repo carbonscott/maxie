@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+# -- OLCF specific imports
+from maxie.plugins.olcf import init_dist_env_on_summit
+
 # -- Basic imports
 import os
 import yaml
@@ -129,7 +132,7 @@ model_name   = model_params.get("name")
 
 # -- Loss
 loss_config      = config.get("loss")
-grad_accum_steps = max(loss_config.get("grad_accum_steps"), 1)
+grad_accum_steps = max(int(loss_config.get("grad_accum_steps")), 1)
 
 # -- Optimizer
 optim_config = config.get("optim")
@@ -179,6 +182,12 @@ signal.signal(signal.SIGTERM, signal_handler)
 #  DIST SETUP
 # ----------------------------------------------------------------------- #
 # -- DIST init
+# --- OLCF specific env
+# torchrun doesn't work well on OLCF.  Refer to https://docs.olcf.ornl.gov/software/python/pytorch_frontier.html#torchrun
+# Thanks to the suggestion by @frobnitzem
+torchrun_exists = int(os.environ.get("RANK", -1)) != -1
+if not torchrun_exists: init_dist_env_on_summit()
+
 # --- Initialize distributed environment
 uses_dist = int(os.environ.get("RANK", -1)) != -1
 if uses_dist:
@@ -188,7 +197,7 @@ if uses_dist:
     dist.init_process_group(backend     = dist_backend,
                             rank        = dist_rank,
                             world_size  = dist_world_size,
-                            timeout     = timedelta(seconds=900),
+                            timeout     = timedelta(seconds=1800),
                             init_method = "env://",)
     print(f"RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
 else:
@@ -198,7 +207,8 @@ else:
     print(f"NO FSDP is used.  RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
 
 # --- Set up GPU device
-device = f'cuda:{dist_local_rank}' if torch.cuda.is_available() else 'cpu'
+gpu_idx = dist_local_rank % torch.cuda.device_count()    # dist_local_rank is node-centric, whereas torch.cuda.device_count() is resource-centeric (on LSF)
+device = f'cuda:{gpu_idx}' if torch.cuda.is_available() else 'cpu'
 if device != 'cpu': torch.cuda.set_device(device)
 seed_offset = dist_rank if uses_unique_world_seed else 0
 
@@ -379,8 +389,9 @@ if uses_dist:
 
     dist.barrier()
 
-# -- Optional grad sync off
-no_grad_sync_context = model.no_sync() if grad_accum_steps > 1 else nullcontext()
+# -- Optional grad sync off (to allow grad accumulation)
+grad_sync_context = lambda enables_sync: nullcontext() if enables_sync else model.no_sync()
+
 
 # -- [TODO] Apply activation checkpointing
 ac_layer = None
@@ -558,32 +569,31 @@ try:
             sampler.set_epoch(epoch)
 
             # -- Train one mini batch
-            grad_accum_counter = 0
+            grad_nosync_counter = 0
             for batch_idx, batch_data in tqdm.tqdm(enumerate(dataloader), total = len(dataloader), desc = f'[RANK {dist_rank}] Mini batch'):    # (B, C, H, W)
                 if batch_data is not None:
                     batch_input = batch_data
                     batch_input = batch_input.to(device, non_blocking = True)
 
-                    # Forward
-                    with autocast_context:
-                        batch_output = model(batch_input)
-                        loss = batch_output.loss  # Refer to https://github.com/huggingface/transformers/blob/e34da3ee3c9d2d628fdbeb60cee45c4f8f32945a/src/transformers/models/vit_mae/modeling_vit_mae.py#L1001
-                        loss = loss / grad_accum_steps  # scale the loss to account for gradient accumulation
+                    # Conditionally turn off grad sync for grad accumulation to simulate a larger batch unless the sync is due or the last batch
+                    # Refer to https://github.com/pytorch/pytorch/blob/6c4f43f82675b5fcfe8cf3e5983d0c0f326408aa/test/distributed/fsdp/test_fsdp_grad_acc.py#L180
+                    is_grad_sync_required = is_last_batch(batch_idx, len(dataloader)) or is_action_due(grad_nosync_counter, grad_accum_steps)
+                    with grad_sync_context(is_grad_sync_required):
+                        # Forward
+                        with autocast_context:
+                            batch_output = model(batch_input)
+                            loss = batch_output.loss  # Refer to https://github.com/huggingface/transformers/blob/e34da3ee3c9d2d628fdbeb60cee45c4f8f32945a/src/transformers/models/vit_mae/modeling_vit_mae.py#L1001
+                            loss = loss / grad_accum_steps  # scale the loss to account for gradient accumulation
 
-                    # Log the training loop loss
-                    if dist_rank == 0:
-                        logger.info(f"[RANK {dist_rank}] LOSS:TRAIN - epoch {epoch}, micro_batch {micro_batch}, mean train loss = {loss:.8f}")
+                        # Log the training loop loss
+                        if dist_rank == 0:
+                            logger.info(f"[RANK {dist_rank}] LOSS:TRAIN - epoch {epoch}, micro_batch {micro_batch}, mean train loss = {loss:.8f}")
 
-                    # Backward
-                    # Turn off grad sync for every batch to simulate a larger batch size
-                    with no_grad_sync_context:
+                        # Backward
                         scaler.scale(loss).backward()
 
-                    # Increment the grad accum counter
-                    grad_accum_counter += 1
-
-                # Conditional parameter updates either when it's due or the last batch
-                if is_action_due(grad_accum_counter, grad_accum_steps) or is_last_batch(batch_idx, len(dataloader)):
+                # Conditional parameter updates either when grad sync is required
+                if is_grad_sync_required:
                     # Grad clipping
                     if grad_clip != 0.0:
                         scaler.unscale_(optimizer)
@@ -597,11 +607,10 @@ try:
                     optimizer.zero_grad(set_to_none=True)
 
                     # Reset grad accum counter
-                    grad_accum_counter = 0
+                    grad_nosync_counter = 0
 
-            # Track and update micro batch for conditional logging and eval
-            micro_batch += 1
-            seg_pbar.update(1)
+                # Increment the grad accum counter
+                grad_nosync_counter += 1
 
             # -- Eval and checkpointing
             # Rank0 performs evaluation and decide if a sharded state dict should be saved
@@ -664,6 +673,10 @@ try:
 
             # -- Update lr after one iteration
             scheduler.step()
+
+            # Track and update micro batch for conditional logging and eval
+            micro_batch += 1
+            seg_pbar.update(1)
 
             # [PERFORMANCE]
             if dist_local_rank == 0:
