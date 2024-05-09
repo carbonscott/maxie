@@ -30,7 +30,7 @@ def get_stats(img, event_num):
     return np.mean(data), np.std(data)
 
 def get_sample_stats(exp, run, detector_name):
-    psana_img = PsanaImg(exp, run, "calib", detector_name)
+    psana_img = PsanaImg(exp, run, "idx", detector_name)
     num_events = len(psana_img)
     valid_events = [event for event in range(num_events) if event is not None]
     sampled_events = np.random.choice(valid_events, len(valid_events)//10, replace=False)
