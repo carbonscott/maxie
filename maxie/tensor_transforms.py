@@ -38,7 +38,7 @@ class Pad:
         return pad_width
 
 
-    def __call__(self, img):
+    def __call__(self, img, **kwargs):
         pad_width  = self.calc_pad_width(img)
         img_padded = F.pad(img, pad_width, 'constant', 0)
 
@@ -50,7 +50,7 @@ class DownscaleLocalMean:
         self.factors = factors
 
 
-    def __call__(self, img):
+    def __call__(self, img, **kwargs):
         kernel_size = self.factors
         stride      = self.factors
 
@@ -74,7 +74,7 @@ class RandomPatch:
         self.returns_mask = returns_mask
 
 
-    def __call__(self, img):
+    def __call__(self, img, **kwargs):
         num_patch    = self.num_patch
         H_patch      = self.H_patch
         W_patch      = self.W_patch
@@ -119,7 +119,7 @@ class RandomRotate:
     def __init__(self, angle_max=360):
         self.angle_max = angle_max
 
-    def __call__(self, img):
+    def __call__(self, img, **kwargs):
         angle = random.uniform(0, self.angle_max)
 
         original_dtype = img.dtype
@@ -140,7 +140,7 @@ class RandomShift:
         self.frac_y_shift_max = frac_y_shift_max
         self.frac_x_shift_max = frac_x_shift_max
 
-    def __call__(self, img, verbose=False):
+    def __call__(self, img, verbose=False, **kwargs):
         frac_y_shift_max = self.frac_y_shift_max
         frac_x_shift_max = self.frac_x_shift_max
 
@@ -193,7 +193,7 @@ class Patchify:
         self.patch_size = patch_size
         self.stride     = stride
 
-    def __call__(self, batch_img):
+    def __call__(self, batch_img, **kwargs):
         """
         Arguments:
             img: (B, C, H, W)
