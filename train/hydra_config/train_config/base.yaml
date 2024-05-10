@@ -12,9 +12,7 @@ dataset:
   seg_size       : 20
   server_address : [localhost, 5000]
   transforms:
-    norm: {'Rayonix': {'mean': 116.92, 'std': 22.89}, \
-           'epix10k2M': {'mean': 46.6, 'std': 98.3}, \
-           'jungfrau4M': {'mean': 593.17, 'std': 204.13}}
+    norm: {'Rayonix': {'mean': 116.92, 'std': 22.89}, 'epix10k2M': {'mean': 46.6, 'std': 98.3}, 'jungfrau4M': {'mean': 593.17, 'std': 204.13}}
     H_pad: 2048
     W_pad: 2048
     num_patch: 100
