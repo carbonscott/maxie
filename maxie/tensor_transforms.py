@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 import torchvision
 from torchvision.transforms.functional import rotate
+from torchvision.transforms import Normalize
 
 import random
 
@@ -224,3 +225,13 @@ class Patchify:
         batch_patches = batch_patches.permute(0, 4, 1, 2, 3).contiguous()
 
         return batch_patches
+
+class Norm:
+    def __init__(self, detector_norm_params):
+        self.detector_params = detector_norm_params
+
+    def __call__(self, img, detector_name, **kwargs):
+        mean, std = self.detector_params[detector_name]["mean"], self.detector_params[detector_name]["std"]
+        C = img.shape[1]
+        normalizer = Normalize([mean]*C, [std]*C)
+        return normalizer(img)

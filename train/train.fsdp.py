@@ -25,7 +25,7 @@ from maxie.utils.seed           import set_seed
 from maxie.utils.misc           import is_action_due
 from maxie.lr_scheduler         import CosineLRScheduler
 from maxie.perf                 import Timer
-from maxie.tensor_transforms    import Pad, DownscaleLocalMean, RandomPatch, RandomRotate, RandomShift, Patchify
+from maxie.tensor_transforms    import Pad, DownscaleLocalMean, RandomPatch, RandomRotate, RandomShift, Patchify, Norm
 from maxie.utils_fsdp           import (
     MemoryMaximizer,
     verify_bfloat_support,
@@ -107,24 +107,25 @@ path_chkpt_prev     = chkpt_config.get("path_chkpt_prev")
 chkpt_saving_period = chkpt_config.get("chkpt_saving_period")
 
 # -- Dataset
-dataset_config    = config.get("dataset")
-path_train_json   = dataset_config.get("path_train")
-path_eval_json    = dataset_config.get("path_eval")
-batch_size        = dataset_config.get("batch_size")
-num_workers       = dataset_config.get("num_workers")
-seg_size          = dataset_config.get("seg_size")
-server_address    = dataset_config.get("server_address")
-transforms_config = dataset_config.get("transforms")
-num_patch         = transforms_config.get("num_patch")
-size_patch        = transforms_config.get("size_patch")
-frac_shift_max    = transforms_config.get("frac_shift_max")
-angle_max         = transforms_config.get("angle_max")
-var_size_patch    = transforms_config.get("var_size_patch")
-downscale_factors = transforms_config.get("downscale_factors")
-H_pad             = transforms_config.get("H_pad")
-W_pad             = transforms_config.get("W_pad")
-patch_size        = transforms_config.get("patch_size")
-stride            = transforms_config.get("stride")
+dataset_config       = config.get("dataset")
+path_train_json      = dataset_config.get("path_train")
+path_eval_json       = dataset_config.get("path_eval")
+batch_size           = dataset_config.get("batch_size")
+num_workers          = dataset_config.get("num_workers")
+seg_size             = dataset_config.get("seg_size")
+server_address       = dataset_config.get("server_address")
+transforms_config    = dataset_config.get("transforms")
+num_patch            = transforms_config.get("num_patch")
+size_patch           = transforms_config.get("size_patch")
+frac_shift_max       = transforms_config.get("frac_shift_max")
+angle_max            = transforms_config.get("angle_max")
+var_size_patch       = transforms_config.get("var_size_patch")
+downscale_factors    = transforms_config.get("downscale_factors")
+H_pad                = transforms_config.get("H_pad")
+W_pad                = transforms_config.get("W_pad")
+patch_size           = transforms_config.get("patch_size")
+stride               = transforms_config.get("stride")
+detector_norm_params = transforms_config.get("norm")
 
 # -- Model
 model_params = config.get("model")
@@ -289,6 +290,7 @@ set_seed(world_seed)
 
 # -- Set up transformation
 transforms = (
+    Norm(detector_norm_params),
     Pad(H_pad, W_pad),
     ## DownscaleLocalMean(factors = downscale_factors),
     ## RandomPatch(num_patch = num_patch, H_patch = size_patch, W_patch = size_patch, var_H_patch = var_size_patch, var_W_patch = var_size_patch, returns_mask = False),

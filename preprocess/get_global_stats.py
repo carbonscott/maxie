@@ -7,6 +7,7 @@ from maxie.datasets.utils import split_list_into_chunk
 import multiprocessing
 import os
 import numpy as np
+import csv
 
 import yaml
 import tqdm
@@ -27,40 +28,44 @@ def init_psana_check(exp, run, access_mode, detector_name):
 
 def get_stats(img, event_num):
     data = img.get(event_num, mode = "calib")
-    return np.mean(data), np.std(data)
+    if data is not None:
+        return np.mean(data), np.std(data)
+    else:
+        return np.nan, np.nan
 
-def get_sample_stats(exp, run, detector_name):
-    psana_img = PsanaImg(exp, run, "idx", detector_name)
+def get_sample_stats(exp, run, access_mode, detector_name):
+    psana_img = PsanaImg(exp, run, access_mode, detector_name)
     num_events = len(psana_img)
-    valid_events = [event for event in range(num_events) if event is not None]
-    sampled_events = np.random.choice(valid_events, len(valid_events)//10, replace=False)
-    means, stds = np.zeros(len(sampled_events)), np.zeros(len(sampled_events))
-    for i, event_num in enumerate(sampled_events):
-        means[i] = get_stats(psana_img, event_num)
-        stds[i] = get_stats(psana_img, event_num)
+    if num_events <= 10:
+        return
+    proposed_sample = np.random.choice(range(num_events), int(0.1*num_events), replace=False)
+    print(f"Proposed sample: {proposed_sample}")
+    sampled_events, means, stds = [], [], []
+    for event_num in proposed_sample:
+        event_mean, event_std = get_stats(psana_img, event_num)
+        print(event_mean, event_std)
+        means.append(event_mean)
+        stds.append(event_std)
+        if event_mean:
+            sampled_events.append(event_num)
 
     output = {
         'exp' : exp,
         'run' : run,
         "detector_name": detector_name,
-        "events": valid_events,
-        "num_events" : num_events,
-        "mean" : np.mean(means),
-        "std" : np.std(stds)
+        "mean" : np.nanmean(means),
+        "std" : np.nanstd(stds)
     }
 
-    dir_output  = 'outputs'
-    file_output = f'{exp}_r{run:04d}_stats.yaml'
-    path_output = os.path.join(dir_output, file_output)
-    os.makedirs(dir_output, exist_ok=True)
+    fields = list(output.keys())
 
-    yaml_data = yaml.dump(output)
-    with open(path_output, 'w') as file:
-        file.write(yaml_data)
+    with open("outputs/summary_stats.csv", "a") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writerow(output)
 
-def run_psana(exp, run, detector_name):
+def run_psana(exp, run, access_mode, detector_name):
     try:
-        get_sample_stats(exp, run, detector_name)
+        get_sample_stats(exp, run, access_mode, detector_name)
     except Exception as e:
         print(f"Caught an exception: {e}!!!")
 
@@ -80,7 +85,7 @@ def main(cfg: DictConfig):
         print(f"Process terminated with exit code {p.exitcode}!!!")
     else:
         print(f"Psana is lauchable...")
-        run_psana(exp, run, detector_name)
+        run_psana(exp, run, access_mode, detector_name)
 
 if __name__ == "__main__":
     main()
