@@ -479,6 +479,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         DistributedSampler class, best with shuffle being true.  The shuffle
         takes place before batching.
     '''
+    print("Enter estimate_loss...")
     model.eval()
 
     ## # !!!!!!!!!!!!!!!
@@ -662,69 +663,61 @@ try:
             if is_action_due(micro_batch, chkpt_saving_period):
                 print(f'[RANK {dist_rank}] Start evaluation...')
 
-                # -- Eval
-                # --- Train
-                # Get a random subset of the training set
-                dataset_eval_train.reset()
-                high_seg_idx = dataset_eval_train.total_size - seg_size * dist_world_size
-                rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
-                dataset_eval_train.set_start_idx(rand_start_idx)
-
-                sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_train, shuffle=True)
-                dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
-
-                # Shuffle the training example
-                sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
-
-                # !!!!!!!!!!!!!!!
-                # !! Data dump !!
-                # !!!!!!!!!!!!!!!
-                data_dump_timestamp = {
-                    "fl_log_prefix" : fl_log_prefix,
-                    "epoch"         : epoch,
-                    "micro_batch"   : micro_batch,
-                }
-
+                # -- Eval (Rank 0 only)
+                validate_loss = 0.0
                 if dist_rank == 0:
+                    # --- Train
+                    # Get a random subset of the training set
+                    dataset_eval_train.reset()
+                    high_seg_idx = dataset_eval_train.total_size - seg_size * dist_world_size
+                    rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
+                    dataset_eval_train.set_start_idx(rand_start_idx)
+
+                    dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = None, num_workers = num_workers, shuffle = True, collate_fn=custom_collate)
+
+                    # !!!!!!!!!!!!!!!
+                    # !! Data dump !!
+                    # !!!!!!!!!!!!!!!
+                    data_dump_timestamp = {
+                        "fl_log_prefix" : fl_log_prefix,
+                        "epoch"         : epoch,
+                        "micro_batch"   : micro_batch,
+                    }
+
                     # Get loss
-                    ## train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device)
                     train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device, **data_dump_timestamp)
 
                     # Log the train loss
                     logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, micro_batch {micro_batch}, mean train loss = {train_loss:.8f}")
-                dist.barrier()
 
-                # --- Validation
-                # Get a random subset of the validation set
-                dataset_eval_val.reset()
-                high_seg_idx = dataset_eval_val.total_size - seg_size * dist_world_size
-                rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
-                dataset_eval_val.set_start_idx(rand_start_idx)
+                    # --- Validation
+                    # Get a random subset of the validation set
+                    dataset_eval_val.reset()
+                    high_seg_idx = dataset_eval_val.total_size - seg_size * dist_world_size
+                    rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
+                    dataset_eval_val.set_start_idx(rand_start_idx)
 
-                sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_val, shuffle=True)
-                dataloader_eval = torch.utils.data.DataLoader(dataset_eval_val, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
+                    dataloader_eval = torch.utils.data.DataLoader(dataset_eval_val, batch_size=batch_size, sampler = None, num_workers = num_workers, shuffle = True, collate_fn=custom_collate)
 
-                # Shuffle the validation example
-                sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
-
-                validate_loss = 0.0
-                if dist_rank == 0:
-                    ## validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device)
                     validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device, **data_dump_timestamp)
 
                     # Log the validation loss
                     logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, micro_batch {micro_batch}, mean validation loss = {validate_loss:.8f}")
+
+                # Sync the validate loss for sharded checkpointing
                 dist.broadcast(torch.tensor([validate_loss], device=device), src = 0)
 
                 # -- Save checkpoint
                 if validate_loss < loss_min:
                     loss_min = validate_loss
 
+                    # Collect training state
                     training_state.epoch_min      = epoch
                     training_state.start_idx_prev = dataset_train.start_idx
                     training_state.end_idx_prev   = dataset_train.end_idx
                     training_state.loss_min       = loss_min
 
+                    # Save a checkpoint
                     dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
                     if dir_chkpt_prefix is not None: dir_chkpt = f"{dir_chkpt_prefix}.{dir_chkpt}"
                     path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
