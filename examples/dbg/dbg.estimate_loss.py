@@ -433,7 +433,7 @@ scheduler = CosineLRScheduler(optimizer         = optimizer,
 print(f'[RANK {dist_rank}] Confguring optimizer...')
 # -- Set init training state dict
 loss_min = float('inf')
-training_state_dict_config = TrainingStateDictConfig(
+training_state = TrainingStateDictConfig(
     epoch     = 0,
     start_idx = dataset_train.start_idx,
     end_idx   = dataset_train.end_idx,
@@ -445,7 +445,7 @@ chkpt_config = ShardedStateDictCheckpointConfig(
     model           = model,
     optimizer       = optimizer,
     lr_scheduler    = scheduler,
-    training_state  = training_state_dict_config,
+    training_state  = training_state,
     rank            = dist_rank,
     device          = device,
     path_checkpoint = path_chkpt_prev,
@@ -719,6 +719,11 @@ try:
                 # -- Save checkpoint
                 if validate_loss < loss_min:
                     loss_min = validate_loss
+
+                    training_state.epoch_min      = epoch
+                    training_state.start_idx_prev = dataset_train.start_idx
+                    training_state.end_idx_prev   = dataset_train.end_idx
+                    training_state.loss_min       = loss_min
 
                     dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
                     if dir_chkpt_prefix is not None: dir_chkpt = f"{dir_chkpt_prefix}.{dir_chkpt}"
