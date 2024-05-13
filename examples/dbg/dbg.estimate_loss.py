@@ -485,16 +485,17 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     print(f"[RANK {dist_rank}] - EVAL Entering")
     model.eval()
 
-    ## # !!!!!!!!!!!!!!!
-    ## # !! Data dump !!
-    ## # !!!!!!!!!!!!!!!
-    ## if dist.get_rank() == 0:
-    ##     dir_data_dump = "data_dump"
-    ##     os.makedirs(dir_data_dump, exist_ok=True)
+    # !!!!!!!!!!!!!!!
+    # !! Data dump !!
+    # !!!!!!!!!!!!!!!
+    if dist_rank == 0:
+        dir_data_dump = "data_dump"
+        os.makedirs(dir_data_dump, exist_ok=True)
 
-    ##     fl_log_prefix = kwargs.get('fl_log_prefix')
-    ##     epoch         = kwargs.get('epoch')
-    ##     micro_batch   = kwargs.get('micro_batch')
+        fl_log_prefix = kwargs.get('fl_log_prefix')
+        epoch         = kwargs.get('epoch')
+        micro_batch   = kwargs.get('micro_batch')
+
 
     if max_iter is None:
         max_iter = len(dataloader)
@@ -523,19 +524,20 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
             print(f"[RANK {dist_rank}] EVAL - Loss")
             loss = batch_output.loss
 
-        ## # !!!!!!!!!!!!!!!
-        ## # !! Data dump !!
-        ## # !!!!!!!!!!!!!!!
-        ## if dist.get_rank() == 0:
-        ##     mini_batch = enum_idx
+        # !!!!!!!!!!!!!!!
+        # !! Data dump !!
+        # !!!!!!!!!!!!!!!
+        if dist_rank == 0:
+            mini_batch = enum_idx
 
-        ##     data_dump = {
-        ##         "batch_data" : batch_data,
-        ##         "batch_output" : batch_output,
-        ##         "loss" : loss,
-        ##     }
-        ##     path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_microb{micro_batch}_minib{mini_batch}.loop.pt')
-        ##     torch.save(data_dump, path_data_dump)
+            data_dump = {
+                "batch_data"   : batch_data,
+                "batch_output" : batch_output,
+                "loss"         : loss,
+            }
+            path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_microb{micro_batch}_minib{mini_batch}.loop.pt')
+            torch.save(data_dump, path_data_dump)
+
 
         losses[enum_idx]      = loss
         num_samples[enum_idx] = len(batch_input)
@@ -559,33 +561,29 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     world_losses_mean += losses_mean
 
     dist.all_reduce(world_losses_mean, op=dist.ReduceOp.SUM)
+    dist.barrier()
 
-    ## world_losses_mean     = [ torch.tensor(0.0).to(device) for _ in range(dist_world_size) ]
-    ## world_num_samples_sum = [ torch.tensor(0.0).to(device) for _ in range(dist_world_size) ]
-    ## dist.all_gather(world_losses_mean, losses_mean)
-    ## dist.all_gather(world_num_samples_sum, num_samples_sum)
-
-    ## world_losses_mean     = torch.tensor(world_losses_mean)
-    ## world_num_samples_sum = torch.tensor(world_num_samples_sum)
-    ## world_avg_weights     = world_num_samples_sum / world_num_samples_sum.sum()
-    ## world_mean_loss       = torch.dot(world_losses_mean, world_avg_weights)
-
-    ## # !!!!!!!!!!!!!!!
-    ## # !! Data dump !!
-    ## # !!!!!!!!!!!!!!!
-    ## if dist.get_rank() == 0:
-    ##     data_dump = {
-    ##         "world_losses_mean"     : world_losses_mean,
-    ##         "world_num_samples_sum" : world_num_samples_sum,
-    ##         "world_mean_loss"       : world_mean_loss,
-    ##     }
-    ##     path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_microb{micro_batch}.end.pt')
-    ##     torch.save(data_dump, path_data_dump)
+    # !!!!!!!!!!!!!!!
+    # !! Data dump !!
+    # !!!!!!!!!!!!!!!
+    if dist_rank == 0:
+        data_dump = {
+            "losses"            : losses,
+            "proc_masks"        : proc_masks,
+            "non_nan_mask"      : non_nan_mask,
+            "masks"             : masks,
+            "valid_losses"      : valid_losses,
+            "avg_weights"       : avg_weights,
+            "losses_mean"       : losses_mean,
+            "world_losses_mean" : world_losses_mean,
+        }
+        path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_microb{micro_batch}.end.pt')
+        torch.save(data_dump, path_data_dump)
 
     model.train()
 
     return world_losses_mean
-    ## return losses[masks > 0].mean()
+
 
 def is_last_batch(batch_idx, num_batches):
     return batch_idx + 1 == num_batches
