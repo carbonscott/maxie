@@ -707,14 +707,14 @@ try:
                 # Shuffle the validation example
                 sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
-                validate_loss = None
+                validate_loss = 0.0
                 if dist_rank == 0:
                     ## validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device)
                     validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device, **data_dump_timestamp)
 
                     # Log the validation loss
                     logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, micro_batch {micro_batch}, mean validation loss = {validate_loss:.8f}")
-                dist.broadcast(torch.tensor(validate_loss), src = 0)
+                dist.broadcast(torch.tensor([validate_loss], device=device), src = 0)
 
                 # -- Save checkpoint
                 if validate_loss < loss_min:
