@@ -481,16 +481,16 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     '''
     model.eval()
 
-    # !!!!!!!!!!!!!!!
-    # !! Data dump !!
-    # !!!!!!!!!!!!!!!
-    if dist.get_rank() == 0:
-        dir_data_dump = "data_dump"
-        os.makedirs(dir_data_dump, exist_ok=True)
+    ## # !!!!!!!!!!!!!!!
+    ## # !! Data dump !!
+    ## # !!!!!!!!!!!!!!!
+    ## if dist.get_rank() == 0:
+    ##     dir_data_dump = "data_dump"
+    ##     os.makedirs(dir_data_dump, exist_ok=True)
 
-        fl_log_prefix = kwargs.get('fl_log_prefix')
-        epoch         = kwargs.get('epoch')
-        micro_batch   = kwargs.get('micro_batch')
+    ##     fl_log_prefix = kwargs.get('fl_log_prefix')
+    ##     epoch         = kwargs.get('epoch')
+    ##     micro_batch   = kwargs.get('micro_batch')
 
     if max_iter is None:
         max_iter = len(dataloader)
@@ -519,49 +519,57 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
             ## print("Loss")
             loss = batch_output.loss
 
-        # !!!!!!!!!!!!!!!
-        # !! Data dump !!
-        # !!!!!!!!!!!!!!!
-        if dist.get_rank() == 0:
-            mini_batch = enum_idx
+        ## # !!!!!!!!!!!!!!!
+        ## # !! Data dump !!
+        ## # !!!!!!!!!!!!!!!
+        ## if dist.get_rank() == 0:
+        ##     mini_batch = enum_idx
 
-            data_dump = {
-                "batch_data" : batch_data,
-                "batch_output" : batch_output,
-                "loss" : loss,
-            }
-            path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_microb{micro_batch}_minib{mini_batch}.loop.pt')
-            torch.save(data_dump, path_data_dump)
+        ##     data_dump = {
+        ##         "batch_data" : batch_data,
+        ##         "batch_output" : batch_output,
+        ##         "loss" : loss,
+        ##     }
+        ##     path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_microb{micro_batch}_minib{mini_batch}.loop.pt')
+        ##     torch.save(data_dump, path_data_dump)
 
         losses[enum_idx]      = loss
         num_samples[enum_idx] = len(batch_input)
         masks[enum_idx]       = 1
 
-    losses_sum      = torch.dot(losses[masks > 0], num_samples[masks > 0])  # [WORKAROUND] Need a proper logic to filter out None events
-    num_samples_sum = num_samples[masks > 0].sum()
+    ## # Calculate mean loss over all batches
+    ## valid_losses      = losses[masks > 0]
+    ## valid_num_samples = num_samples[masks > 0]
+    ## num_samples_sum   = valid_num_samples.sum()
+    ## avg_weights       = valid_num_samples / num_samples_sum
+    ## losses_mean       = torch.dot(valid_losses, avg_weights)
 
-    world_losses_sum      = [ torch.tensor(0.0).to(device) for _ in range(dist_world_size) ]
-    world_num_samples_sum = [ torch.tensor(0.0).to(device) for _ in range(dist_world_size) ]
-    dist.all_gather(world_losses_sum, losses_sum)
-    dist.all_gather(world_num_samples_sum, num_samples_sum)
+    ## world_losses_mean     = [ torch.tensor(0.0).to(device) for _ in range(dist_world_size) ]
+    ## world_num_samples_sum = [ torch.tensor(0.0).to(device) for _ in range(dist_world_size) ]
+    ## dist.all_gather(world_losses_mean, losses_mean)
+    ## dist.all_gather(world_num_samples_sum, num_samples_sum)
 
-    world_losses_mean = torch.tensor(world_losses_sum).sum() / torch.tensor(world_num_samples_sum).sum()
+    ## world_losses_mean     = torch.tensor(world_losses_mean)
+    ## world_num_samples_sum = torch.tensor(world_num_samples_sum)
+    ## world_avg_weights     = world_num_samples_sum / world_num_samples_sum.sum()
+    ## world_mean_loss       = torch.dot(world_losses_mean, world_avg_weights)
 
-    # !!!!!!!!!!!!!!!
-    # !! Data dump !!
-    # !!!!!!!!!!!!!!!
-    if dist.get_rank() == 0:
-        data_dump = {
-            "world_losses_sum"      : world_losses_sum,
-            "world_num_samples_sum" : world_num_samples_sum,
-            "world_losses_mean"     : world_losses_mean,
-        }
-        path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_microb{micro_batch}.end.pt')
-        torch.save(data_dump, path_data_dump)
+    ## # !!!!!!!!!!!!!!!
+    ## # !! Data dump !!
+    ## # !!!!!!!!!!!!!!!
+    ## if dist.get_rank() == 0:
+    ##     data_dump = {
+    ##         "world_losses_mean"     : world_losses_mean,
+    ##         "world_num_samples_sum" : world_num_samples_sum,
+    ##         "world_mean_loss"       : world_mean_loss,
+    ##     }
+    ##     path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_microb{micro_batch}.end.pt')
+    ##     torch.save(data_dump, path_data_dump)
 
     model.train()
 
-    return world_losses_mean
+    ## return world_mean_loss
+    return losses[masks > 0].mean()
 
 def is_last_batch(batch_idx, num_batches):
     return batch_idx + 1 == num_batches
@@ -677,13 +685,14 @@ try:
                     "micro_batch"   : micro_batch,
                 }
 
-                # Get loss
-                ## train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device)
-                train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device, **data_dump_timestamp)
-
-                # Log the train loss
                 if dist_rank == 0:
+                    # Get loss
+                    ## train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device)
+                    train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device, **data_dump_timestamp)
+
+                    # Log the train loss
                     logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, micro_batch {micro_batch}, mean train loss = {train_loss:.8f}")
+                dist.barrier()
 
                 # --- Validation
                 # Get a random subset of the validation set
@@ -698,12 +707,14 @@ try:
                 # Shuffle the validation example
                 sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
-                ## validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device)
-                validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device, **data_dump_timestamp)
-
-                # Log the validation loss
+                validate_loss = None
                 if dist_rank == 0:
+                    ## validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device)
+                    validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device, **data_dump_timestamp)
+
+                    # Log the validation loss
                     logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, micro_batch {micro_batch}, mean validation loss = {validate_loss:.8f}")
+                dist.broadcast(torch.tensor(validate_loss), src = 0)
 
                 # -- Save checkpoint
                 if validate_loss < loss_min:
