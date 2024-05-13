@@ -718,7 +718,7 @@ try:
 
                 # -- Save checkpoint
                 if validate_loss < loss_min:
-                    loss_min = validate_loss.item()
+                    loss_min = validate_loss
 
                     dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
                     if dir_chkpt_prefix is not None: dir_chkpt = f"{dir_chkpt_prefix}.{dir_chkpt}"
