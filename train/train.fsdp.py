@@ -165,6 +165,7 @@ max_epochs           = misc_config.get("max_epochs")
 max_eval_iter        = misc_config.get("max_eval_iter")
 num_gpus             = misc_config.get("num_gpus")
 compiles_model       = misc_config.get("compiles_model")
+data_dump_on         = misc_config.get("data_dump_on", False)
 
 # ----------------------------------------------------------------------- #
 #  MISC FEATURES
@@ -488,7 +489,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     # !!!!!!!!!!!!!!!
     # !! Data dump !!
     # !!!!!!!!!!!!!!!
-    if dist_rank == 0:
+    if dist_rank == 0 and data_dump_on:
         dir_data_dump = "data_dump"
         os.makedirs(dir_data_dump, exist_ok=True)
 
@@ -496,7 +497,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         epoch         = kwargs.get('epoch')
         micro_batch   = kwargs.get('micro_batch')
 
-
+    # Set default number of iterations
     if max_iter is None:
         max_iter = len(dataloader)
 
@@ -527,7 +528,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         # !!!!!!!!!!!!!!!
         # !! Data dump !!
         # !!!!!!!!!!!!!!!
-        if dist_rank == 0:
+        if dist_rank == 0 and data_dump_on:
             mini_batch = enum_idx
 
             data_dump = {
@@ -571,7 +572,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     # !!!!!!!!!!!!!!!
     # !! Data dump !!
     # !!!!!!!!!!!!!!!
-    if dist_rank == 0:
+    if dist_rank == 0 and data_dump_on:
         data_dump = {
             "losses"            : losses,
             "proc_masks"        : proc_masks,
@@ -677,18 +678,20 @@ try:
                 grad_nosync_counter += 1
 
             # -- Eval and checkpointing
-            # Rank0 performs evaluation and decide if a sharded state dict should be saved
             if is_action_due(micro_batch, chkpt_saving_period):
                 # !!!!!!!!!!!!!!!
                 # !! Data dump !!
                 # !!!!!!!!!!!!!!!
                 data_dump_timestamp = {
-                    "fl_log_prefix"   : fl_log_prefix,
-                    "epoch"           : epoch,
-                    "micro_batch"     : micro_batch,
                     "dist_rank"       : dist_rank,
                     "dist_world_size" : dist_world_size,
                 }
+                if data_dump_on:
+                    data_dump_timestamp.update({
+                        "fl_log_prefix"   : fl_log_prefix,
+                        "epoch"           : epoch,
+                        "micro_batch"     : micro_batch,
+                    })
 
                 print(f'[RANK {dist_rank}] Start evaluation...')
 
