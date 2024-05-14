@@ -43,6 +43,7 @@ misc:
   num_nodes           : 4
   uses_mixed_precision: true
   compiles_model      : false
+  data_dump_on        : false
 model:
   name: 'facebook/vit-mae-base'
 optim:
