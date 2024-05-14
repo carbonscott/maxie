@@ -547,18 +547,23 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     non_nan_mask = ~torch.isnan(losses)
 
     # Get the actual mask of values that are from the processing loop and non nan
-    masks = proc_masks>0 & non_nan_mask
+    masks = torch.logical_and(proc_masks>0, non_nan_mask)
 
     # Calculate mean loss over all batches
-    valid_losses      = losses[masks]
+    valid_losses      = losses[masks].to(torch.float32)
     valid_num_samples = num_samples[masks]
     num_samples_sum   = valid_num_samples.sum()
-    avg_weights       = valid_num_samples / num_samples_sum
-    losses_mean       = torch.dot(valid_losses, avg_weights)
+    avg_weights       = valid_num_samples / (num_samples_sum+1e-6)
+    losses_mean       = torch.dot(valid_losses, avg_weights)    # Even [] gives 0.0
     losses_mean      /= dist_world_size    # Scaled it now to prevent nan from summing large values
 
-    world_losses_mean  = torch.zeros_like(losses_mean)
-    world_losses_mean += losses_mean
+    world_losses_mean  = torch.zeros_like(losses_mean, dtype = torch.float32, device = device)
+    world_losses_mean += losses_mean.to(torch.float32)
+
+    world_nan_masks = torch.isnan(world_losses_mean)
+    if world_nan_masks.any().item():
+        print(f"[RANK {dist_rank}] EVAL ERROR: NaN encountered!!!")
+        world_losses_mean[world_nan_masks] = 0.0    # Contribute to nothing in the reduced sum
 
     dist.all_reduce(world_losses_mean, op=dist.ReduceOp.SUM)
     dist.barrier()
