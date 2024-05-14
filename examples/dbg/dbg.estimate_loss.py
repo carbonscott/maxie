@@ -25,7 +25,7 @@ from maxie.utils.seed           import set_seed
 from maxie.utils.misc           import is_action_due
 from maxie.lr_scheduler         import CosineLRScheduler
 from maxie.perf                 import Timer
-from maxie.tensor_transforms    import Pad, DownscaleLocalMean, RandomPatch, RandomRotate, RandomShift, Patchify, Norm
+from maxie.tensor_transforms    import Pad, DownscaleLocalMean, RandomPatch, RandomRotate, RandomShift, Patchify
 from maxie.utils_fsdp           import (
     MemoryMaximizer,
     verify_bfloat_support,
@@ -107,25 +107,24 @@ path_chkpt_prev     = chkpt_config.get("path_chkpt_prev")
 chkpt_saving_period = chkpt_config.get("chkpt_saving_period")
 
 # -- Dataset
-dataset_config       = config.get("dataset")
-path_train_json      = dataset_config.get("path_train")
-path_eval_json       = dataset_config.get("path_eval")
-batch_size           = dataset_config.get("batch_size")
-num_workers          = dataset_config.get("num_workers")
-seg_size             = dataset_config.get("seg_size")
-server_address       = dataset_config.get("server_address")
-transforms_config    = dataset_config.get("transforms")
-num_patch            = transforms_config.get("num_patch")
-size_patch           = transforms_config.get("size_patch")
-frac_shift_max       = transforms_config.get("frac_shift_max")
-angle_max            = transforms_config.get("angle_max")
-var_size_patch       = transforms_config.get("var_size_patch")
-downscale_factors    = transforms_config.get("downscale_factors")
-H_pad                = transforms_config.get("H_pad")
-W_pad                = transforms_config.get("W_pad")
-patch_size           = transforms_config.get("patch_size")
-stride               = transforms_config.get("stride")
-detector_norm_params = transforms_config.get("norm")
+dataset_config    = config.get("dataset")
+path_train_json   = dataset_config.get("path_train")
+path_eval_json    = dataset_config.get("path_eval")
+batch_size        = dataset_config.get("batch_size")
+num_workers       = dataset_config.get("num_workers")
+seg_size          = dataset_config.get("seg_size")
+server_address    = dataset_config.get("server_address")
+transforms_config = dataset_config.get("transforms")
+num_patch         = transforms_config.get("num_patch")
+size_patch        = transforms_config.get("size_patch")
+frac_shift_max    = transforms_config.get("frac_shift_max")
+angle_max         = transforms_config.get("angle_max")
+var_size_patch    = transforms_config.get("var_size_patch")
+downscale_factors = transforms_config.get("downscale_factors")
+H_pad             = transforms_config.get("H_pad")
+W_pad             = transforms_config.get("W_pad")
+patch_size        = transforms_config.get("patch_size")
+stride            = transforms_config.get("stride")
 
 # -- Model
 model_params = config.get("model")
@@ -166,7 +165,6 @@ max_epochs           = misc_config.get("max_epochs")
 max_eval_iter        = misc_config.get("max_eval_iter")
 num_gpus             = misc_config.get("num_gpus")
 compiles_model       = misc_config.get("compiles_model")
-data_dump_on         = misc_config.get("data_dump_on", False)
 
 # ----------------------------------------------------------------------- #
 #  MISC FEATURES
@@ -291,7 +289,6 @@ set_seed(world_seed)
 
 # -- Set up transformation
 transforms = (
-    Norm(detector_norm_params),
     Pad(H_pad, W_pad),
     ## DownscaleLocalMean(factors = downscale_factors),
     ## RandomPatch(num_patch = num_patch, H_patch = size_patch, W_patch = size_patch, var_H_patch = var_size_patch, var_W_patch = var_size_patch, returns_mask = False),
@@ -491,7 +488,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     # !!!!!!!!!!!!!!!
     # !! Data dump !!
     # !!!!!!!!!!!!!!!
-    if dist_rank == 0 and data_dump_on:
+    if dist_rank == 0:
         dir_data_dump = "data_dump"
         os.makedirs(dir_data_dump, exist_ok=True)
 
@@ -499,7 +496,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         epoch         = kwargs.get('epoch')
         micro_batch   = kwargs.get('micro_batch')
 
-    # Set default number of iterations
+
     if max_iter is None:
         max_iter = len(dataloader)
 
@@ -530,7 +527,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         # !!!!!!!!!!!!!!!
         # !! Data dump !!
         # !!!!!!!!!!!!!!!
-        if dist_rank == 0 and data_dump_on:
+        if dist_rank == 0:
             mini_batch = enum_idx
 
             data_dump = {
@@ -574,7 +571,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     # !!!!!!!!!!!!!!!
     # !! Data dump !!
     # !!!!!!!!!!!!!!!
-    if dist_rank == 0 and data_dump_on:
+    if dist_rank == 0:
         data_dump = {
             "losses"            : losses,
             "proc_masks"        : proc_masks,
@@ -680,24 +677,11 @@ try:
                 grad_nosync_counter += 1
 
             # -- Eval and checkpointing
+            # Rank0 performs evaluation and decide if a sharded state dict should be saved
             if is_action_due(micro_batch, chkpt_saving_period):
-                # !!!!!!!!!!!!!!!
-                # !! Data dump !!
-                # !!!!!!!!!!!!!!!
-                data_dump_timestamp = {
-                    "dist_rank"       : dist_rank,
-                    "dist_world_size" : dist_world_size,
-                }
-                if data_dump_on:
-                    data_dump_timestamp.update({
-                        "fl_log_prefix"   : fl_log_prefix,
-                        "epoch"           : epoch,
-                        "micro_batch"     : micro_batch,
-                    })
-
                 print(f'[RANK {dist_rank}] Start evaluation...')
 
-                # -- Eval
+                # -- Eval (Rank 0 only)
                 validate_loss = 0.0
 
                 # --- Train
@@ -710,14 +694,22 @@ try:
                 sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_train, shuffle=True)
                 dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
 
-                # Shuffle the training example
-                sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
+                # !!!!!!!!!!!!!!!
+                # !! Data dump !!
+                # !!!!!!!!!!!!!!!
+                data_dump_timestamp = {
+                    "fl_log_prefix"   : fl_log_prefix,
+                    "epoch"           : epoch,
+                    "micro_batch"     : micro_batch,
+                    "dist_rank"       : dist_rank,
+                    "dist_world_size" : dist_world_size,
+                }
 
                 # Get loss
                 train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device, **data_dump_timestamp)
 
-                # Log the train loss
                 if dist_rank == 0:
+                    # Log the train loss
                     logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, micro_batch {micro_batch}, mean train loss = {train_loss:.8f}")
 
                 # --- Validation
@@ -730,13 +722,10 @@ try:
                 sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_val, shuffle=True)
                 dataloader_eval = torch.utils.data.DataLoader(dataset_eval_val, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
 
-                # Shuffle the validation example
-                sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
-
                 validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device, **data_dump_timestamp)
 
-                # Log the validation loss
                 if dist_rank == 0:
+                    # Log the validation loss
                     logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, micro_batch {micro_batch}, mean validation loss = {validate_loss:.8f}")
 
                 # -- Save checkpoint
@@ -749,6 +738,7 @@ try:
                     training_state.end_idx_prev   = dataset_train.end_idx
                     training_state.loss_min       = loss_min
 
+                    # Save a checkpoint
                     dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
                     if dir_chkpt_prefix is not None: dir_chkpt = f"{dir_chkpt_prefix}.{dir_chkpt}"
                     path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
