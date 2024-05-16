@@ -3,8 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import torchvision
-from torchvision.transforms.functional import rotate
-from torchvision.transforms import Normalize
+from torchvision.transforms.functional import rotate, normalize
 
 import random
 
@@ -228,10 +227,9 @@ class Patchify:
 
 class Norm:
     def __init__(self, detector_norm_params):
-        self.detector_params = detector_norm_params
+        self.detector_norm_params = detector_norm_params
 
     def __call__(self, img, detector_name, **kwargs):
-        mean, std = self.detector_params[detector_name]["mean"], self.detector_params[detector_name]["std"]
-        C = img.shape[1]
-        normalizer = Normalize([mean]*C, [std]*C)
-        return normalizer(img)
+        mean, std = self.detector_norm_params[detector_name]["mean"], self.detector_norm_params[detector_name]["std"]
+        C = img.shape[-3]
+        return normalize(img, [mean]*C, [std]*C)
