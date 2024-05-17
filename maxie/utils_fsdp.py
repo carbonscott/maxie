@@ -587,8 +587,8 @@ class ShardedStateDictCheckpoint:
         state_dict = None
         with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
             state_dict = dict(
-                model_state_dict = model.state_dict()
-                optim_state_dict = FSDP.optim_state_dict(model, optimizer)
+                model_state_dict = model.state_dict(),
+                optim_state_dict = FSDP.optim_state_dict(model, optimizer),
             )
 
         return state_dict
@@ -639,7 +639,7 @@ class ShardedStateDictCheckpoint:
             load_state_dict(
                 state_dict     = state_dict,
                 storage_reader = FileSystemReader(path_checkpoint),
-                ## planner        = DefaultLoadPlanner(),
+                planner        = DefaultLoadPlanner(),
             )
             model.load_state_dict(state_dict.get('model_state_dict'))
             ## model.to(self.config.rank)
@@ -649,11 +649,10 @@ class ShardedStateDictCheckpoint:
             raise ValueError("Optimizer has not been properly initialized")
 
         with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
-            optim_state = load_sharded_optim_state_dict(
+            optim_state = load_sharded_optimizer_state_dict(
                 model_state_dict = state_dict.get('model_state_dict'),
                 optimizer_key    = 'optim_state_dict',
                 storage_reader   = FileSystemReader(path_checkpoint),
-                planner          = DefaultLoadPlanner(),
             )
         flattened_optim_state_dict = FSDP.optim_state_dict_to_load(
             model = model, optim = optimizer, optim_state_dict = optim_state.get('optim_state_dict')
