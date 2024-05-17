@@ -409,7 +409,7 @@ class FullStateDictCheckpoint:
         if rank == 0:
             if self.full_state_dict is None:
                 self.full_state_dict = torch.load(path_checkpoint, map_location = 'cpu')
-            optim_full_state_dict = self.full_state_dict.get('optimizer_state_dict')
+            optim_full_state_dict = self.full_state_dict.get('optim_state_dict')
 
         # Scatter the optimizer state to all ranks...
         sharded_optim_state_dict = FSDP.scatter_full_optim_state_dict(optim_full_state_dict, model)
@@ -468,7 +468,7 @@ class FullStateDictCheckpoint:
             path_checkpoint = self.config.path_checkpoint
             full_state_dict = {
                 'model_state_dict'     : model_full_state_dict,
-                'optimizer_state_dict' : optim_full_state_dict,
+                'optim_state_dict'     : optim_full_state_dict,
                 'scheduler_state_dict' : lr_scheduler_state_dict,
                 'training_state_dict'  : training_state_dict,
             }
@@ -572,20 +572,42 @@ class ShardedStateDictCheckpoint:
         return optim_state_dict
 
 
+    def _prepare_model_and_optimizer_state_dict(self):
+        model     = self.config.model
+        optimizer = self.config.optimizer
+
+        # Sanity check if the model is wrapped with FSDP
+        if not ShardedStateDictCheckpoint.contains_fsdp(model):
+            raise ValueError(f"RANK {self.config.rank} - The model subject to "  \
+            "checkpointing must be wrapped with an FSDP wrapper before saving a "\
+            "full state dict.")
+
+        # Pulling sharded state dict
+        # Refer to https://github.com/pytorch/pytorch/blob/697ed6f5b3484a09410af075c34419e94fa42592/test/distributed/checkpoint/test_fsdp_optim_state.py#L73
+        state_dict = None
+        with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
+            state_dict = dict(
+                model_state_dict = model.state_dict()
+                optim_state_dict = FSDP.optim_state_dict(model, optimizer)
+            )
+
+        return state_dict
+
+
     def _save_model_and_optimizer(self):
         # Prepare the state_dict
         model_state_dict = self._prepare_model_state_dict()
         optim_state_dict = self._prepare_optim_state_dict()
 
         state_dict = dict(
-            model_state_dict     = model_state_dict,
-            optimizer_state_dict = optim_state_dict,
+            model_state_dict = model_state_dict,
+            optim_state_dict = optim_state_dict,
         )
 
         # Create a directory for saving checkpoints
         device = self.config.device
         path_checkpoint = self.config.path_checkpoint
-        path_checkpoint = broadcast_dict(dict(path_checkpoint=path_checkpoint), src = 0, device = device).get('path_checkpoint')
+        ## path_checkpoint = broadcast_dict(dict(path_checkpoint=path_checkpoint), src = 0, device = device).get('path_checkpoint')
         os.makedirs(path_checkpoint, exist_ok=True)
 
         # Write the state_dict to a checkpoint directory
@@ -617,7 +639,7 @@ class ShardedStateDictCheckpoint:
             load_state_dict(
                 state_dict     = state_dict,
                 storage_reader = FileSystemReader(path_checkpoint),
-                planner        = DefaultLoadPlanner(),
+                ## planner        = DefaultLoadPlanner(),
             )
             model.load_state_dict(state_dict.get('model_state_dict'))
             ## model.to(self.config.rank)
@@ -627,13 +649,14 @@ class ShardedStateDictCheckpoint:
             raise ValueError("Optimizer has not been properly initialized")
 
         with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
-            optim_state = load_sharded_optimizer_state_dict(
-                model_state_dict = model.state_dict(),
-                optimizer_key    = 'optimizer_state_dict',
+            optim_state = load_sharded_optim_state_dict(
+                model_state_dict = state_dict.get('model_state_dict'),
+                optimizer_key    = 'optim_state_dict',
                 storage_reader   = FileSystemReader(path_checkpoint),
+                planner          = DefaultLoadPlanner(),
             )
         flattened_optim_state_dict = FSDP.optim_state_dict_to_load(
-            model = model, optim = optimizer, optim_state_dict = optim_state.get('optimizer_state_dict')
+            model = model, optim = optimizer, optim_state_dict = optim_state.get('optim_state_dict')
         )
         optimizer.load_state_dict(flattened_optim_state_dict)
 
