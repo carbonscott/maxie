@@ -482,6 +482,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         DistributedSampler class, best with shuffle being true.  The shuffle
         takes place before batching.
     '''
+    # -- Setup
     dist_rank       = kwargs.get('dist_rank')
     dist_world_size = kwargs.get('dist_world_size')
 
@@ -499,6 +500,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         epoch         = kwargs.get('epoch')
         micro_batch   = kwargs.get('micro_batch')
 
+    # -- Eval iterations
     # Set default number of iterations
     if max_iter is None:
         max_iter = len(dataloader)
@@ -546,30 +548,34 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         num_samples[enum_idx] = len(batch_input)
         proc_masks[enum_idx]   = 1
 
+    # -- Handle nan
     # Obtain the nan mask
     non_nan_mask = ~torch.isnan(losses)
 
     # Get the actual mask of values that are from the processing loop and non nan
     masks = torch.logical_and(proc_masks>0, non_nan_mask)
 
-    # Calculate mean loss over all batches
-    valid_losses      = losses[masks].to(torch.float32)
-    valid_num_samples = num_samples[masks]
-    num_samples_sum   = valid_num_samples.sum()
-    avg_weights       = valid_num_samples / (num_samples_sum+1e-6)
-    losses_mean       = torch.dot(valid_losses, avg_weights)    # Even [] gives 0.0
-    losses_mean      /= dist_world_size    # Scaled it now to prevent nan from summing large values
+    # -- Mean loss over eval iterations
+    local_valid_losses = losses[masks].to(torch.float32)
+    local_losses_mean  = local_valid_losses.mean()
 
-    world_losses_mean  = torch.zeros_like(losses_mean, dtype = torch.float32, device = device)
-    world_losses_mean += losses_mean.to(torch.float32)
-
-    world_nan_masks = torch.isnan(world_losses_mean)
-    if world_nan_masks.any().item():
+    # -- Mean loss over ranks
+    # Survey the occurence of nan across ranks
+    world_nan_counter = torch.tensor(0, dtype = torch.int, device = device)
+    local_nan_masks = torch.isnan(local_losses_mean)
+    if local_nan_masks.any().item():
         print(f"[RANK {dist_rank}] EVAL ERROR: NaN encountered!!!")
-        world_losses_mean[world_nan_masks] = 0.0    # Contribute to nothing in the reduced sum
+        world_nan_counter += 1
+        local_losses_mean  = 0.0    # Contribute to nothing in the reduced sum
+    dist.all_reduce(world_nan_counter, op=dist.ReduceOp.SUM)
 
+    # Scale the local loss for the final reduced sum
+    local_losses_mean /= (dist_world_size - world_nan_counter + 1e-6)
+
+    # Calculate reduced sum as the final mean loss
+    world_losses_mean  = torch.zeros_like(local_losses_mean, dtype = torch.float32, device = device)
+    world_losses_mean += local_losses_mean.to(torch.float32)
     dist.all_reduce(world_losses_mean, op=dist.ReduceOp.SUM)
-    dist.barrier()
 
     # !!!!!!!!!!!!!!!
     # !! Data dump !!
@@ -580,9 +586,8 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
             "proc_masks"        : proc_masks,
             "non_nan_mask"      : non_nan_mask,
             "masks"             : masks,
-            "valid_losses"      : valid_losses,
-            "avg_weights"       : avg_weights,
-            "losses_mean"       : losses_mean,
+            "local_valid_losses": local_valid_losses,
+            "local_losses_mean" : local_losses_mean,
             "world_losses_mean" : world_losses_mean,
         }
         path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_microb{micro_batch}.end.pt')
