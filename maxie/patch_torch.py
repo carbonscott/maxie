@@ -1,5 +1,8 @@
 # Monkey patch the `build_metadata` method
-# Refer to https://github.com/b-chu/pytorch/blob/3ccc8f3357447f83ce56dd9d7618e520e4a11e97/torch/distributed/_shard/sharding_spec/chunk_sharding_spec.py
+# Refer to
+# - Discussion: https://github.com/pytorch/pytorch/pull/108915
+# - Diff: https://github.com/pytorch/pytorch/pull/108915/files
+# - Codes: https://github.com/b-chu/pytorch/blob/3ccc8f3357447f83ce56dd9d7618e520e4a11e97/torch/distributed/_shard/sharding_spec/chunk_sharding_spec.py
 import torch
 from dataclasses import dataclass
 import torch
