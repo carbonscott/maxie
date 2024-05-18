@@ -537,6 +537,11 @@ class ShardedStateDictCheckpoint:
     def __init__(self, config):
         self.config = config
 
+        torch_version = torch.__version__
+        torch_version = torch_version[:torch_version.find("+") if "+" in torch_version else None]
+        if packaging.version.parse(torch_version) <= packaging.version.parse("2.0.1"):
+            from . import patch_torch
+
 
     @staticmethod
     def contains_fsdp(module):
