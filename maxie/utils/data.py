@@ -3,6 +3,8 @@
 
 import logging
 import random
+from sklearn.model_selection import train_test_split
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,15 @@ def split_dataset(dataset_list, fracA, seed = None):
 
     return fracA_list, fracB_list
 
+def split_dataset_stratified(dataset_list, fracA, detectors_by_exp, yaml_regex=r"/(\w+)_r\d+\.yaml"):
+    """Split a dataset into two subsets A and B by user-specified fraction, maintaining a constant proportion of 
+    samples from each detector type in each sample. 
+    """
+    # For each file in the dataset, determine the detector used to generate data
+    detector_list = [detectors_by_exp[re.findall(yaml_regex)[0]] for file in dataset_list]
+    # Then, perform stratified split
+    fracA_list, fracB_list = train_test_split(dataset_list, train_size=fracA, stratify=detector_list)
+    return fracA_list, fracB_list
 
 def split_list_into_chunk(input_list, max_num_chunk = 2):
 
