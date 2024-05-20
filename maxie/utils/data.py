@@ -34,7 +34,7 @@ def split_dataset(dataset_list, fracA, seed = None):
 
     return fracA_list, fracB_list
 
-def split_dataset_stratified(dataset_list, fracA, detectors_by_exp, yaml_regex=r"/(\w+)_r\d+\.yaml"):
+def split_dataset_stratified(dataset_list, fracA):
     """Split a dataset into two subsets A and B by user-specified fraction, maintaining a constant proportion of 
     samples from each detector type in each sample. 
     """
