@@ -39,7 +39,7 @@ def split_dataset_stratified(dataset_list, fracA, detectors_by_exp, yaml_regex=r
     samples from each detector type in each sample. 
     """
     # For each file in the dataset, determine the detector used to generate data
-    detector_list = [detectors_by_exp[re.findall(yaml_regex)[0]] for file in dataset_list]
+    detector_list = [run["detector_name"] for run in dataset_list]
     # Then, perform stratified split
     fracA_list, fracB_list = train_test_split(dataset_list, train_size=fracA, stratify=detector_list)
     return fracA_list, fracB_list
