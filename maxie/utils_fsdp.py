@@ -47,6 +47,10 @@ except ImportError:
     import warnings
     warnings.warn("Using older version of the FSDP checkpoint API.", DeprecationWarning)
 
+from torch.distributed.fsdp.api import (
+    ShardedOptimStateDictConfig,
+    ShardedStateDictConfig,
+)
 
 # -- Imports for understanding package versions
 from pkg_resources import packaging
@@ -58,6 +62,9 @@ from typing import Optional
 # -- Rest
 import pickle
 import os
+
+# -- Patch PyTorch
+from .patches.build_metadata import patch_build_metadata
 
 # ----------------------------------------------------------------------- #
 #  MEMORY TOOL
@@ -330,8 +337,8 @@ class FullStateDictCheckpoint:
         # Pull full state dict from the sharded model...
         with FSDP.state_dict_type(
             model,
-            StateDictType.FULL_STATE_DICT,
-            full_state_saving_policy
+            state_dict_type  =StateDictType.FULL_STATE_DICT,
+            state_dict_config=full_state_saving_policy,
         ):
             state_dict = model.state_dict()
 
@@ -349,8 +356,14 @@ class FullStateDictCheckpoint:
             "full state dict.")
 
         state_dict = None
-        if optimizer is not None:
-            state_dict = FSDP.full_optim_state_dict(model, optimizer)
+
+        # Pull full state dict from the sharded model...
+        with FSDP.state_dict_type(
+            model,
+            state_dict_type  =StateDictType.FULL_STATE_DICT,
+            state_dict_config=full_state_saving_policy,
+        ):
+            state_dict = FSDP.optim_state_dict(model, optimizer)
 
         return state_dict
 
@@ -537,10 +550,7 @@ class ShardedStateDictCheckpoint:
     def __init__(self, config):
         self.config = config
 
-        torch_version = torch.__version__
-        torch_version = torch_version[:torch_version.find("+") if "+" in torch_version else None]
-        if packaging.version.parse(torch_version) <= packaging.version.parse("2.0.1"):
-            from . import patch_torch
+        patch_build_metadata()
 
 
     @staticmethod
@@ -559,7 +569,12 @@ class ShardedStateDictCheckpoint:
 
         # Pulling sharded state dict
         model_state_dict = None
-        with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
+        with FSDP.state_dict_type(
+            model,
+            state_dict_type        = StateDictType.SHARDED_STATE_DICT,
+            state_dict_config      =ShardedStateDictConfig(offload_to_cpu=True),
+            optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
+        ):
             model_state_dict = model.state_dict()
 
         return model_state_dict
@@ -571,8 +586,14 @@ class ShardedStateDictCheckpoint:
 
         # Pulling sharded state dict
         optim_state_dict = None
-        with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
-            optim_state_dict = FSDP.sharded_optim_state_dict(model, optimizer)
+        with FSDP.state_dict_type(
+            model,
+            state_dict_type        = StateDictType.SHARDED_STATE_DICT,
+            state_dict_config      =ShardedStateDictConfig(offload_to_cpu=True),
+            optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
+        ):
+            # Refer to https://github.com/wz337/pytorch/blob/a0429c01ad665ffb2faa04a411913ecee9962566/test/distributed/checkpoint/test_fsdp_optim_state.py#L77C26-L77C42
+            optim_state_dict = FSDP.optim_state_dict(model, optimizer)
 
         return optim_state_dict
 
@@ -590,7 +611,12 @@ class ShardedStateDictCheckpoint:
         # Pulling sharded state dict
         # Refer to https://github.com/pytorch/pytorch/blob/697ed6f5b3484a09410af075c34419e94fa42592/test/distributed/checkpoint/test_fsdp_optim_state.py#L73
         state_dict = None
-        with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
+        with FSDP.state_dict_type(
+            model,
+            state_dict_type        = StateDictType.SHARDED_STATE_DICT,
+            state_dict_config      =ShardedStateDictConfig(offload_to_cpu=True),
+            optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
+        ):
             state_dict = dict(
                 model_state_dict = model.state_dict(),
                 optim_state_dict = FSDP.optim_state_dict(model, optimizer),
@@ -639,7 +665,12 @@ class ShardedStateDictCheckpoint:
             "checkpointing must be wrapped with an FSDP wrapper before saving a "\
             "full state dict.")
 
-        with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
+        with FSDP.state_dict_type(
+            model,
+            state_dict_type        = StateDictType.SHARDED_STATE_DICT,
+            state_dict_config      =ShardedStateDictConfig(offload_to_cpu=True),
+            optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
+        ):
             state_dict = dict(model_state_dict = model.state_dict())
             load_state_dict(
                 state_dict     = state_dict,
@@ -653,7 +684,12 @@ class ShardedStateDictCheckpoint:
         if optimizer is None:
             raise ValueError("Optimizer has not been properly initialized")
 
-        with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
+        with FSDP.state_dict_type(
+            model,
+            state_dict_type        = StateDictType.SHARDED_STATE_DICT,
+            state_dict_config      =ShardedStateDictConfig(offload_to_cpu=True),
+            optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
+        ):
             optim_state = load_sharded_optimizer_state_dict(
                 model_state_dict = state_dict.get('model_state_dict'),
                 optimizer_key    = 'optim_state_dict',
