@@ -42,6 +42,7 @@ def split_dataset_stratified(dataset_list, fracA):
     detector_list = [run["detector_name"] for run in dataset_list]
     # Then, perform stratified split
     fracA_list, fracB_list = train_test_split(dataset_list, train_size=fracA, stratify=detector_list)
+    assert(len(fracB_list) is not None and len(fracA_list) is not None)
     return fracA_list, fracB_list
 
 def split_list_into_chunk(input_list, max_num_chunk = 2):
