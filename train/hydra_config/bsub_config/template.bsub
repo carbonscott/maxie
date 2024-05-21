@@ -7,6 +7,9 @@
 #BSUB -J {{ job }}
 #BSUB -nnodes {{ num_nodes }}
 
+# Set up the Huggingface's cache directory
+export TRANSFORMERS_CACHE={{ transformers_cache }}
+
 export http_proxy=http://proxy.ccs.ornl.gov:3128/
 export https_proxy=http://proxy.ccs.ornl.gov:3128/
 
@@ -49,3 +52,5 @@ jsrun \
 --launch_distribution packed \
 python {{ trainer }} {{ yaml_config }}
 
+# Kill all running applications (e.g. the ipc server)
+jskill all
