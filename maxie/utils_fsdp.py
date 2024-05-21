@@ -290,6 +290,7 @@ def broadcast_dict(obj, src=0, device = 'cpu'):
 @dataclass
 class TrainingStateDictConfig:
     epoch      : int
+    seg        : int
     start_idx  : int
     end_idx    : int
     loss_min   : float
@@ -301,7 +302,7 @@ class FullStateDictCheckpointConfig:
     model          : Optional[nn.Module]    # A FSDP wrapped model on all ranks
     optimizer      : Optional[torch.optim.Optimizer]
     lr_scheduler   : Optional[torch.optim.lr_scheduler._LRScheduler]
-    training_state : TrainingStateDictConfig
+    training_state : Optional[TrainingStateDictConfig]
     rank           : int
     device         : str
     path_checkpoint: Optional[str]
@@ -357,13 +358,19 @@ class FullStateDictCheckpoint:
 
         state_dict = None
 
+        # Configure full state dict saving...
+        full_state_saving_policy = FullStateDictConfig(
+            offload_to_cpu = True,
+            rank0_only     = True,
+        )
+
         # Pull full state dict from the sharded model...
         with FSDP.state_dict_type(
             model,
             state_dict_type  =StateDictType.FULL_STATE_DICT,
             state_dict_config=full_state_saving_policy,
         ):
-            state_dict = FSDP.optim_state_dict(model, optimizer)
+            state_dict = FSDP.full_optim_state_dict(model, optimizer)
 
         return state_dict
 
@@ -414,9 +421,11 @@ class FullStateDictCheckpoint:
         """
         Must run after FSDP wrapper.
         """
-        rank      = self.config.rank
-        optimizer = self.config.optimizer
-        model     = self.config.model
+        rank            = self.config.rank
+        device          = self.config.device
+        path_checkpoint = self.config.path_checkpoint
+        optimizer       = self.config.optimizer
+        model           = self.config.model
 
         optim_full_state_dict = None
         if rank == 0:
@@ -424,9 +433,12 @@ class FullStateDictCheckpoint:
                 self.full_state_dict = torch.load(path_checkpoint, map_location = 'cpu')
             optim_full_state_dict = self.full_state_dict.get('optim_state_dict')
 
-        # Scatter the optimizer state to all ranks...
-        sharded_optim_state_dict = FSDP.scatter_full_optim_state_dict(optim_full_state_dict, model)
-        optimizer.load_state_dict(sharded_optim_state_dict)
+        optim_full_state_dict = broadcast_dict(optim_full_state_dict, src = 0, device = device)
+
+        flattened_optim_state_dict = FSDP.optim_state_dict_to_load(
+            model = model, optim = optimizer, optim_state_dict = optim_full_state_dict
+        )
+        optimizer.load_state_dict(flattened_optim_state_dict)
 
 
     def _load_training_state_dict(self):
