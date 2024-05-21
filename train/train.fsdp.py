@@ -30,8 +30,8 @@ from maxie.utils_fsdp           import (
     MemoryMaximizer,
     verify_bfloat_support,
     TrainingStateDictConfig,
-    ShardedStateDictCheckpointConfig,
-    ShardedStateDictCheckpoint,
+    FullStateDictCheckpointConfig,
+    FullStateDictCheckpoint,
     broadcast_dict,
 )
 
@@ -75,7 +75,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 import torch.distributed as dist
 
 # -- Debug
-torch.autograd.set_detect_anomaly(False)    # [WARNING] Making it True may throw errors when using bfloat16
+torch.autograd.set_detect_anomaly(True)    # [WARNING] Making it True may throw errors when using bfloat16
 
 # -- Reporting specific imports
 import colorama
@@ -142,12 +142,13 @@ weight_decay = float(optim_config.get("weight_decay"))
 grad_clip    = float(optim_config.get("grad_clip"))
 
 # -- Scheduler
-lr_scheduler_config = config.get("lr_scheduler")
-patience            = lr_scheduler_config.get("patience")
-warmup_iterations   = lr_scheduler_config.get("warmup_iterations")
-total_iterations    = lr_scheduler_config.get("total_iterations")
-uses_prev_scheduler = lr_scheduler_config.get("uses_prev")
-min_lr              = float(lr_scheduler_config.get("min_lr"))
+lr_scheduler_config   = config.get("lr_scheduler")
+patience              = lr_scheduler_config.get("patience")
+warmup_iterations     = lr_scheduler_config.get("warmup_iterations")
+total_iterations      = lr_scheduler_config.get("total_iterations")
+uses_prev_scheduler   = lr_scheduler_config.get("uses_prev")
+min_lr                = float(lr_scheduler_config.get("min_lr"))
+scheduler_step_period = lr_scheduler_config.get("scheduler_step_period")
 
 # -- Distributed envs
 dist_config            = config.get("dist")
@@ -369,6 +370,24 @@ if compiles_model:
     print("Compiling the model...")
     model = torch.compile(model) # requires PyTorch 2.0
 
+# -- CHECKPOINT (FULL STATE DICT)
+print(f'[RANK {dist_rank}] Confguring model checkpoint...')
+chkpt_config = FullStateDictCheckpointConfig(
+    model           = model,
+    optimizer       = None,
+    lr_scheduler    = None,
+    training_state  = None,
+    rank            = dist_rank,
+    device          = device,
+    path_checkpoint = path_chkpt_prev,
+)
+checkpointer = FullStateDictCheckpoint(config = chkpt_config)
+from_resume = path_chkpt_prev is not None
+if from_resume:
+    if isinstance(checkpointer, FullStateDictCheckpoint):
+        # Model is loaded
+        checkpointer.pre_fsdp_load()
+
 # -- Wrapping the model in FSDP...
 if uses_dist:
     # Convert BatchNorm to SyncBatchNorm...
@@ -431,45 +450,36 @@ scheduler = CosineLRScheduler(optimizer         = optimizer,
 
 
 # ----------------------------------------------------------------------- #
-#  CHECKPOINT (SHARDED STATE DICT)
+#  CHECKPOINT (FULL STATE DICT)
 # ----------------------------------------------------------------------- #
-print(f'[RANK {dist_rank}] Confguring optimizer...')
+print(f'[RANK {dist_rank}] Confguring model, optim, scheduler, training state checkpoint...')
 # -- Set init training state dict
 loss_min = float('inf')
 training_state = TrainingStateDictConfig(
-    epoch     = 0,
-    start_idx = dataset_train.start_idx,
-    end_idx   = dataset_train.end_idx,
-    loss_min  = loss_min,
+    epoch       = 0,
+    seg         = 0,
+    start_idx   = dataset_train.start_idx,
+    end_idx     = dataset_train.end_idx,
+    loss_min    = loss_min,
 )
-
-# -- Sharded state dict
-chkpt_config = ShardedStateDictCheckpointConfig(
-    model           = model,
-    optimizer       = optimizer,
-    lr_scheduler    = scheduler,
-    training_state  = training_state,
-    rank            = dist_rank,
-    device          = device,
-    path_checkpoint = path_chkpt_prev,
-)
-checkpointer = ShardedStateDictCheckpoint(config = chkpt_config)
 
 # -- Optional resumption
-epoch_min = 0
-from_resume = path_chkpt_prev is not None
+last_epoch = -1
+last_seg   = -1
 if from_resume:
-    if isinstance(checkpointer, ShardedStateDictCheckpoint):
-        checkpointer.load()
+    if isinstance(checkpointer, FullStateDictCheckpoint):
+        # Optimizer, scheduler are loaded
+        checkpointer.post_fsdp_load(model, optimizer, scheduler, training_state)
 
-        training_state = checkpointer.config.training_state
-        epoch_min      = training_state.epoch
-        start_idx_prev = training_state.start_idx
-        end_idx_prev   = training_state.end_idx
-        loss_min       = training_state.loss_min
+        # Training state
+        training_state          = checkpointer.config.training_state
+        last_epoch              = training_state.epoch
+        last_seg                = training_state.seg
+        loss_min                = training_state.loss_min
+        dataset_train.start_idx = training_state.start_idx
+        dataset_train.end_idx   = training_state.end_idx
 
-        scheduler.step()    # scheduler state loading is handled inside checkpoint.load()
-        logger.info(f"PREV - epoch_min = {epoch_min}, loss_min = {loss_min}")
+        logger.info(f"PREV - last_epoch {last_epoch}, last_seg {dataset_train.start_idx}-{dataset_train.end_idx}, loss_min = {loss_min}")
 
 
 # ----------------------------------------------------------------------- #
@@ -486,7 +496,8 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     dist_rank       = kwargs.get('dist_rank')
     dist_world_size = kwargs.get('dist_world_size')
 
-    print(f"[RANK {dist_rank}] - EVAL Entering")
+    if dist_rank == 0:
+        print(f"[RANK {dist_rank}] - EVAL Entering")
     model.eval()
 
     # !!!!!!!!!!!!!!!
@@ -498,7 +509,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
 
         fl_log_prefix = kwargs.get('fl_log_prefix')
         epoch         = kwargs.get('epoch')
-        micro_batch   = kwargs.get('micro_batch')
+        seg           = kwargs.get('seg')
 
     # -- Eval iterations
     # Set default number of iterations
@@ -512,7 +523,8 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         # Sample at most max_iter batches
         if enum_idx >= max_iter: break
 
-        print(f"[RANK {dist_rank}] EVAL - Pre fetching mini_batch {enum_idx}")
+        if dist_rank == 0:
+            print(f"[RANK {dist_rank}] EVAL - Pre fetching mini_batch {enum_idx}")
 
         # Skip a batch if it's a None
         if batch_data is None: continue
@@ -520,13 +532,16 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         batch_input = batch_data
         batch_input = batch_input.to(device, non_blocking = True)
 
-        print(f"[RANK {dist_rank}] EVAl - Post fetching")
+        if dist_rank == 0:
+            print(f"[RANK {dist_rank}] EVAl - Post fetching")
 
         with autocast_context:
-            print(f"[RANK {dist_rank}] EVAL - Forwarding")
+            if dist_rank == 0:
+                print(f"[RANK {dist_rank}] EVAL - Forwarding")
             batch_output = model(batch_input)
 
-            print(f"[RANK {dist_rank}] EVAL - Loss")
+            if dist_rank == 0:
+                print(f"[RANK {dist_rank}] EVAL - Loss")
             loss = batch_output.loss
 
         # !!!!!!!!!!!!!!!
@@ -540,7 +555,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
                 "batch_output" : batch_output,
                 "loss"         : loss,
             }
-            path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_microb{micro_batch}_minib{mini_batch}.loop.pt')
+            path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_seg{seg}_minib{mini_batch}.loop.pt')
             torch.save(data_dump, path_data_dump)
 
 
@@ -590,7 +605,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
             "local_losses_mean" : local_losses_mean,
             "world_losses_mean" : world_losses_mean,
         }
-        path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_microb{micro_batch}.end.pt')
+        path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_seg{seg}.end.pt')
         torch.save(data_dump, path_data_dump)
 
     model.train()
@@ -606,19 +621,13 @@ def is_last_batch(batch_idx, num_batches):
 # ----------------------------------------------------------------------- #
 print(f'[RANK {dist_rank}] Ready for training loop...')
 try:
-    # -- Train one epoch
-    for epoch in tqdm.tqdm(range(max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
-        # -- Restore epoch and starting micro batch index
-        epoch += epoch_min
-
-        # -- Train on one segment
-        seg_pbar = tqdm.tqdm(total = dataset_train.num_seg, initial = 0, desc = f'[RANK {dist_rank}] Segment')
-        micro_batch = 0
-
+    for epoch in tqdm.tqdm(range(last_epoch+1, max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
+        # -- Train one epoch
         # Reset everything for a new epoch if not from a resume
         if not from_resume:
             dataset_train.reset()
-        while dataset_train.end_idx < dataset_train.total_size:
+        for seg in tqdm.tqdm(range(last_seg+1, dataset_train.num_seg), desc = f'[RANK {dist_rank}] Segment'):
+            # -- Train one segment
             # [PERFORMANCE]
             if dist_local_rank == 0:
                 memmax.start()
@@ -626,8 +635,8 @@ try:
             # -- Switch to training state
             model.train()
 
-            # -- Prepare training on one micro batch (iteration)
-            # Set next micro batch
+            # -- Prepare training on one segment (iteration)
+            # Set next segment
             dataset_train.set_start_idx(dataset_train.end_idx)
 
             if dist_rank == 0:
@@ -640,9 +649,11 @@ try:
             # Shuffle the training example
             sampler.set_epoch(epoch)
 
-            # -- Train one mini batch
             grad_nosync_counter = 0
             for batch_idx, batch_data in tqdm.tqdm(enumerate(dataloader), total = len(dataloader), desc = f'[RANK {dist_rank}] Mini batch'):    # (B, C, H, W)
+                # -- Train one mini batch
+                # Skip None batch
+                # FIXME: Better data cleaning will eliminate None batch
                 if batch_data is not None:
                     batch_input = batch_data
                     batch_input = batch_input.to(device, non_blocking = True)
@@ -659,33 +670,40 @@ try:
 
                         # Log the training loop loss
                         if dist_rank == 0:
-                            logger.info(f"[RANK {dist_rank}] LOSS:TRAIN - epoch {epoch}, micro_batch {micro_batch}, mini_batch {batch_idx}, mean train loss = {loss:.8f}")
+                            seg_start_idx = dataset_train.start_idx
+                            seg_end_idx   = dataset_train.end_idx
+                            logger.info(f"[RANK {dist_rank}] LOSS:TRAIN - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mini_batch {batch_idx}, mean train loss = {loss:.8f} grad_sync = {is_grad_sync_required}")
 
                         # Backward
                         scaler.scale(loss).backward()
 
-                # Conditional parameter updates either when grad sync is required
-                if is_grad_sync_required:
-                    # Grad clipping
-                    if grad_clip != 0.0:
-                        scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                    # Increment the grad nosync counter
+                    grad_nosync_counter += 1
 
-                    # Update parameters
-                    scaler.step(optimizer)
-                    scaler.update()
+                    # Conditional parameter updates when grad sync is required
+                    if is_grad_sync_required:
+                        # Grad clipping
+                        if grad_clip != 0.0:
+                            scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-                    # Flush the gradients
-                    optimizer.zero_grad(set_to_none=True)
+                        # Update parameters
+                        scaler.step(optimizer)
+                        scaler.update()
 
-                    # Reset grad accum counter
-                    grad_nosync_counter = 0
+                        # Flush the gradients
+                        optimizer.zero_grad(set_to_none=True)
 
-                # Increment the grad accum counter
-                grad_nosync_counter += 1
+                        # Reset grad accum counter
+                        grad_nosync_counter = 0
+
+            # -- Update lr every few seg (X segs = one step/iteration)
+            total_seg = seg + epoch * dataset_train.num_seg
+            if is_action_due(total_seg, scheduler_step_period):
+                scheduler.step()
 
             # -- Eval and checkpointing
-            if is_action_due(micro_batch, chkpt_saving_period):
+            if is_action_due(total_seg, chkpt_saving_period):
                 # !!!!!!!!!!!!!!!
                 # !! Data dump !!
                 # !!!!!!!!!!!!!!!
@@ -697,10 +715,11 @@ try:
                     data_dump_timestamp.update({
                         "fl_log_prefix"   : fl_log_prefix,
                         "epoch"           : epoch,
-                        "micro_batch"     : micro_batch,
+                        "seg"             : seg,
                     })
 
-                print(f'[RANK {dist_rank}] Start evaluation...')
+                if dist_rank == 0:
+                    print(f'[RANK {dist_rank}] Start evaluation...')
 
                 # -- Eval
                 validate_loss = 0.0
@@ -723,7 +742,9 @@ try:
 
                 # Log the train loss
                 if dist_rank == 0:
-                    logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, micro_batch {micro_batch}, mean train loss = {train_loss:.8f}")
+                    seg_start_idx = dataset_eval_train.start_idx
+                    seg_end_idx   = dataset_eval_train.end_idx
+                    logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean train loss = {train_loss:.8f}")
 
                 # --- Validation
                 # Get a random subset of the validation set
@@ -742,17 +763,20 @@ try:
 
                 # Log the validation loss
                 if dist_rank == 0:
-                    logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, micro_batch {micro_batch}, mean validation loss = {validate_loss:.8f}")
+                    seg_start_idx = dataset_eval_val.start_idx
+                    seg_end_idx   = dataset_eval_val.end_idx
+                    logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean validation loss = {validate_loss:.8f}")
 
                 # -- Save checkpoint
                 if validate_loss < loss_min:
                     loss_min = validate_loss
 
                     # Collect training state
-                    training_state.epoch_min      = epoch
-                    training_state.start_idx_prev = dataset_train.start_idx
-                    training_state.end_idx_prev   = dataset_train.end_idx
-                    training_state.loss_min       = loss_min
+                    training_state.epoch     = epoch
+                    training_state.seg       = seg
+                    training_state.start_idx = dataset_train.start_idx
+                    training_state.end_idx   = dataset_train.end_idx
+                    training_state.loss_min  = loss_min
 
                     dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
                     if dir_chkpt_prefix is not None: dir_chkpt = f"{dir_chkpt_prefix}.{dir_chkpt}"
@@ -764,13 +788,6 @@ try:
                 dist.barrier()
                 print(f'[RANK {dist_rank}] Done evaluation...')
 
-            # -- Update lr after one iteration
-            scheduler.step()
-
-            # Track and update micro batch for conditional logging and eval
-            micro_batch += 1
-            seg_pbar.update(1)
-
             # [PERFORMANCE]
             if dist_local_rank == 0:
                 memmax.update()
@@ -781,9 +798,6 @@ try:
 
         # Reset the from_resume flag
         from_resume = False
-
-        # Close seg pbar
-        seg_pbar.close()
 
 except KeyboardInterrupt:
     print(f"FSDP RANK {dist_rank}: Training was interrupted!")
