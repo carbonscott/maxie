@@ -1,0 +1,66 @@
+checkpoint:
+  chkpt_saving_period: 1
+  directory: experiments/chkpts
+  filename_prefix: fsdp
+  path_chkpt_prev: null
+  pretrain: null
+dataset:
+  batch_size: 1
+  num_workers: 1
+  path_train: experiments/datasets/dataset.train.json
+  path_eval: experiments/datasets/dataset.eval.json
+  seg_size: 4
+  server_address:
+  - localhost
+  - 5000
+  transforms:
+    norm:
+      Rayonix:
+        mean: 116.92
+        std: 22.89
+      epix10k2M:
+        mean: 46.6
+        std: 98.3
+      jungfrau4M:
+        mean: 593.17
+        std: 204.13
+    H_pad: 2048
+    W_pad: 2048
+    num_patch: 100
+    size_patch: 20
+    angle_max: 360
+    frac_shift_max: 0.1
+    downscale_factors:
+    - 2
+    - 2
+    var_size_patch: 0.2
+    patch_size: 224
+    stride: 224
+dist:
+  backend: nccl
+  uses_unique_world_seed: true
+  dtype: float16
+logging:
+  directory: experiments/logs
+  filename_prefix: start-debug_reduced_batch
+loss:
+  grad_accum_steps: 2
+lr_scheduler:
+  min_lr: 1.0e-07
+  total_iterations: 1000000
+  uses_prev: true
+  warmup_iterations: 5
+misc:
+  max_epochs: 5
+  max_eval_iter: 4
+  num_gpus: 6
+  num_nodes: 4
+  uses_mixed_precision: true
+  compiles_model: false
+  data_dump_on: true
+model:
+  name: facebook/vit-mae-base
+optim:
+  grad_clip: 1.0
+  lr: 0.0002
+  weight_decay: 0.0001
