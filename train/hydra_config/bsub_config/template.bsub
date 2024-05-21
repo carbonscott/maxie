@@ -31,7 +31,6 @@ export LOGLEVEL=INFO
 
 echo "Starting server..."
 jsrun \
---nrs {{ num_nodes }} \
 --tasks_per_rs 1 \
 --cpu_per_rs {{ num_cpus_for_server }} \
 --gpu_per_rs 0 \
