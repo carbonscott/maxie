@@ -107,18 +107,6 @@ class IPCDistributedSegmentedDataset(Dataset):
         for event_tuple in all_events:
             yield event_tuple
 
-
-        # for entry in self.json_entry_list:
-        #     exp           = entry['exp'          ]
-        #     run           = entry['run'          ]
-        #     detector_name = entry['detector_name']
-        #     events        = entry['events'       ]
-        #     num_events    = entry['num_events'   ]
-        #     if events is None:
-        #         events = range(num_events)
-        #     for event in events:
-        #         yield (exp, run, PSANA_ACCESS_MODE, detector_name, event)
-
     def calculate_end_idx(self):
         # Calculate and return the end index for the current dataset segment.
         return min(self.start_idx + self.seg_size * self.world_size, self.total_size)

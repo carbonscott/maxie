@@ -38,7 +38,7 @@ python generate_dataset_in_json.py --yaml $PROJ_MAXIE_TRAIN/dataset.yaml --num_c
 ### Launch a job
 
 ```bash
-python launch_job.py train_config.dataset.path_train=experiments/datasets/dataset.train.json train_config.dataset.path_eval=experiments/datasets/dataset.eval.json train_config.misc.num_gpus=6 train_config.dataset.batch_size=1 train_config.dataset.num_workers=1 train_config.loss.grad_accum_steps=2 train_config.model.name=facebook/vit-mae-base train_config.dataset.seg_size=4 train_config.misc.max_eval_iter=4 train_config.misc.data_dump_on=false train_config.logging.filename_prefix=reduced_batch job=reduced_batch bsub_config.ipc_workers=2 bsub_config.qos=batch bsub_config.walltime=2:00 bsub_config.num_nodes=45 bsub_config.trainer=train.fsdp.py auto_submit=true bsub_config.num_cpus_for_client=4 
+python launch_job.py train_config.dataset.path_train=experiments/datasets/dataset.train.json train_config.dataset.path_eval=experiments/datasets/dataset.eval.json train_config.misc.num_gpus=6 train_config.dataset.batch_size=1 train_config.dataset.num_workers=1 train_config.loss.grad_accum_steps=2 train_config.model.name=facebook/vit-mae-base train_config.dataset.seg_size=4 train_config.misc.max_eval_iter=4 train_config.misc.data_dump_on=false train_config.logging.filename_prefix=job_name job=job_name bsub_config.ipc_workers=2 bsub_config.qos=batch bsub_config.walltime=2:00 bsub_config.num_nodes=45 bsub_config.trainer=train.fsdp.py auto_submit=true bsub_config.num_cpus_for_client=4 bsub_config.transformers_cache=huggingface
 ```
 
 This should generate a yaml at `$MAXIE_TRAIN/experiments/yaml/my_job.yaml` and a
