@@ -1,19 +1,16 @@
 #!/bin/bash
 #BSUB -o lsf/%J.log
 #BSUB -e lsf/%J.err
-#BSUB -q {{ qos }}
-#BSUB -W {{ walltime }}
+#BSUB -q debug
+#BSUB -W 2:00
 #BSUB -P LRN044
-#BSUB -J {{ job }}
-#BSUB -nnodes {{ num_nodes }}
-
-# Set up the Huggingface's cache directory
-export TRANSFORMERS_CACHE={{ transformers_cache }}
+#BSUB -J client_ipc
+#BSUB -nnodes 10
 
 export http_proxy=http://proxy.ccs.ornl.gov:3128/
 export https_proxy=http://proxy.ccs.ornl.gov:3128/
 
-export OMP_NUM_THREADS={{ OMP_NUM_THREADS }}
+export OMP_NUM_THREADS=1
 export NCCL_DEBUG=INFO
 export TORCH_NCCL_BLOCKING_WAIT=1
 
@@ -31,25 +28,23 @@ export LOGLEVEL=INFO
 
 echo "Starting server..."
 jsrun \
+--nrs 10 \
 --tasks_per_rs 1 \
---cpu_per_rs {{ num_cpus_for_server }} \
+--cpu_per_rs 6 \
 --gpu_per_rs 0 \
 --rs_per_host 1 \
 --latency_priority cpu-cpu \
 --launch_distribution packed \
-python server.ipc.py --num_workers {{ ipc_workers }} &
+python server.ipc.py --num_workers 2 &
 
 sleep 10
 
 echo "Running client..."
 jsrun \
---rs_per_host {{ num_gpus_for_client }} \
+--rs_per_host 6 \
 --tasks_per_rs 1 \
---cpu_per_rs {{ num_cpus_for_client }} \
+--cpu_per_rs 4 \
 --gpu_per_rs 1 \
 --latency_priority gpu-gpu \
 --launch_distribution packed \
-python {{ trainer }} {{ yaml_config }}
-
-# Kill all running applications (e.g. the ipc server)
-jskill all
+python client.ipc.py experiments/yaml/client_ipc.yaml
