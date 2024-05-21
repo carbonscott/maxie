@@ -100,7 +100,7 @@ class IPCDistributedSegmentedDataset(Dataset):
             num_events    = entry['num_events'   ]
             if events is None:
                 events = range(num_events)
-            for event in entry['events'       ]:
+            for event in events:
                 all_events.append((exp, run, PSANA_ACCESS_MODE, detector_name, event))
         # Randomize the order of events occurring across all runs of all experiments in dataset
         random.shuffle(all_events)
