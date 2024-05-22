@@ -202,12 +202,12 @@ if uses_dist:
                             world_size  = dist_world_size,
                             timeout     = timedelta(seconds=1800),
                             init_method = "env://",)
-    print(f"RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
+    logger.debug(f"RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
 else:
     dist_rank       = 0
     dist_local_rank = 0
     dist_world_size = 1
-    print(f"NO FSDP is used.  RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
+    logger.info(f"NO FSDP is used.  RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
 
 # --- Set up GPU device
 gpu_idx = dist_local_rank % torch.cuda.device_count()    # dist_local_rank is node-centric, whereas torch.cuda.device_count() is resource-centeric (on LSF)
@@ -284,7 +284,7 @@ timestamp = broadcast_dict(dict(timestamp=timestamp), src = 0, device = device).
 # ----------------------------------------------------------------------- #
 #  DATASET
 # ----------------------------------------------------------------------- #
-print(f'[RANK {dist_rank}] Confguring dataset...')
+logger.debug(f'[RANK {dist_rank}] Configuring dataset...')
 # -- Seeding
 base_seed  = 0
 world_seed = base_seed + seed_offset
@@ -338,7 +338,7 @@ def custom_collate(batch):
 # ----------------------------------------------------------------------- #
 #  MODEL
 # ----------------------------------------------------------------------- #
-print(f'[RANK {dist_rank}] Confguring model...')
+logger.debug(f'[RANK {dist_rank}] Configuring model...')
 # -- Config the model
 model_config = AdaptedViTMAEForPreTrainingConfig(model_name = model_name)
 model = AdaptedViTMAEForPreTraining(model_config)
@@ -352,7 +352,7 @@ if version.parse(torch_version) <= version.parse("2.0.1"):
             param.requires_grad = True
 
 if dist_rank == 0:
-    print(f"{sum(p.numel() for p in model.parameters())/1e6} M pamameters.")
+    logger.debug(f"{sum(p.numel() for p in model.parameters())/1e6} M pamameters.")
 
 # -- Mixed precision
 mixed_precision_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dist_dtype]
@@ -367,7 +367,7 @@ scaler = ShardedGradScaler(enabled=(dist_dtype == 'float16'))
 
 # -- Compile the model
 if compiles_model:
-    print("Compiling the model...")
+    logger.debug("Compiling the model...")
     model = torch.compile(model) # requires PyTorch 2.0
 
 # -- CHECKPOINT (FULL STATE DICT)
@@ -407,7 +407,7 @@ if uses_dist:
     )
 
     sharded_param_count = sum(p.numel() for p in model.module.parameters())
-    print(f"RANK {dist_rank} - sharded parameter count: {sharded_param_count*1e-6} M.")
+    logger.debug(f"RANK {dist_rank} - sharded parameter count: {sharded_param_count*1e-6} M.")
 
     dist.barrier()
 
@@ -426,19 +426,19 @@ if ac_layer is not None:
     )
 
 if dist_rank == 0:
-    print(f"Current timestamp: {timestamp}")
+    logger.debug(f"Current timestamp: {timestamp}")
 
 
 # ----------------------------------------------------------------------- #
 #  CRITERION (LOSS)
 # ----------------------------------------------------------------------- #
-print(f'[RANK {dist_rank}] Confguring criterion (Skip, it is configured in the model)...')
+logger.debug(f'[RANK {dist_rank}] Configuring criterion (Skip, it is configured in the model)...')
 
 
 # ----------------------------------------------------------------------- #
 #  Optimizer
 # ----------------------------------------------------------------------- #
-print(f'[RANK {dist_rank}] Confguring optimizer...')
+logger.debug(f'[RANK {dist_rank}] Configuring optimizer...')
 param_iter = model.parameters()
 optimizer = optim.AdamW(param_iter,
                         lr = lr,
@@ -479,6 +479,7 @@ if from_resume:
         dataset_train.start_idx = training_state.start_idx
         dataset_train.end_idx   = training_state.end_idx
 
+        logger.info("loading from checkpoint.")
         logger.info(f"PREV - last_epoch {last_epoch}, last_seg {dataset_train.start_idx}-{dataset_train.end_idx}, loss_min = {loss_min}")
 
 
@@ -497,7 +498,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     dist_world_size = kwargs.get('dist_world_size')
 
     if dist_rank == 0:
-        print(f"[RANK {dist_rank}] - EVAL Entering")
+        logger.debug(f"[RANK {dist_rank}] - EVAL Entering")
     model.eval()
 
     # !!!!!!!!!!!!!!!
@@ -524,7 +525,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         if enum_idx >= max_iter: break
 
         if dist_rank == 0:
-            print(f"[RANK {dist_rank}] EVAL - Pre fetching mini_batch {enum_idx}")
+            logger.debug(f"[RANK {dist_rank}] EVAL - Pre fetching mini_batch {enum_idx}")
 
         # Skip a batch if it's a None
         if batch_data is None: continue
@@ -533,15 +534,15 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         batch_input = batch_input.to(device, non_blocking = True)
 
         if dist_rank == 0:
-            print(f"[RANK {dist_rank}] EVAl - Post fetching")
+            logger.debug(f"[RANK {dist_rank}] EVAL - Post fetching")
 
         with autocast_context:
             if dist_rank == 0:
-                print(f"[RANK {dist_rank}] EVAL - Forwarding")
+                logger.debug(f"[RANK {dist_rank}] EVAL - Forwarding")
             batch_output = model(batch_input)
 
             if dist_rank == 0:
-                print(f"[RANK {dist_rank}] EVAL - Loss")
+                logger.debug(f"[RANK {dist_rank}] EVAL - Loss")
             loss = batch_output.loss
 
         # !!!!!!!!!!!!!!!
@@ -579,7 +580,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     world_nan_counter = torch.tensor(0, dtype = torch.int, device = device)
     local_nan_masks = torch.isnan(local_losses_mean)
     if local_nan_masks.any().item():
-        print(f"[RANK {dist_rank}] EVAL ERROR: NaN encountered!!!")
+        logger.error(f"[RANK {dist_rank}] EVAL ERROR: NaN encountered!!!")
         world_nan_counter += 1
         local_losses_mean  = 0.0    # Contribute to nothing in the reduced sum
     dist.all_reduce(world_nan_counter, op=dist.ReduceOp.SUM)
@@ -619,7 +620,7 @@ def is_last_batch(batch_idx, num_batches):
 # ----------------------------------------------------------------------- #
 #  TRAINING LOOP
 # ----------------------------------------------------------------------- #
-print(f'[RANK {dist_rank}] Ready for training loop...')
+logger.debug(f'[RANK {dist_rank}] Ready for training loop...')
 try:
     for epoch in tqdm.tqdm(range(last_epoch+1, max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
         # -- Train one epoch
@@ -640,7 +641,7 @@ try:
             dataset_train.set_start_idx(dataset_train.end_idx)
 
             if dist_rank == 0:
-                print(f"Working on segment: {dataset_train.start_idx}:{dataset_train.end_idx}; Total size: {dataset_train.total_size}")
+                logger.info(f"Working on segment: {dataset_train.start_idx}:{dataset_train.end_idx}; Total size: {dataset_train.total_size}")
 
             # Split sampler across ranks
             sampler = torch.utils.data.DistributedSampler(dataset_train, shuffle=True)
@@ -719,7 +720,7 @@ try:
                     })
 
                 if dist_rank == 0:
-                    print(f'[RANK {dist_rank}] Start evaluation...')
+                    logger.debug(f'[RANK {dist_rank}] Start evaluation...')
 
                 # -- Eval
                 validate_loss = 0.0
@@ -767,6 +768,8 @@ try:
                     seg_end_idx   = dataset_eval_val.end_idx
                     logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean validation loss = {validate_loss:.8f}")
 
+                    if dist_rank == 0:
+                        logger.info("Saved checkpoint at: %s", dir_chkpt)
                 # -- Save checkpoint
                 if validate_loss < loss_min:
                     loss_min = validate_loss
@@ -786,7 +789,7 @@ try:
                 # All ranks wait until the end of evaluation by rank 0
                 # [WARNING] Expecting NCCL TIMEOUT ERROR if the evaluation takes too long
                 dist.barrier()
-                print(f'[RANK {dist_rank}] Done evaluation...')
+                logger.debug(f'[RANK {dist_rank}] Done evaluation...')
 
             # [PERFORMANCE]
             if dist_local_rank == 0:
@@ -800,10 +803,10 @@ try:
         from_resume = False
 
 except KeyboardInterrupt:
-    print(f"FSDP RANK {dist_rank}: Training was interrupted!")
+    logger.error(f"FSDP RANK {dist_rank}: Training was interrupted!")
 except Exception as e:
     tb = traceback.format_exc()
-    print(f"FSDP RANK {dist_rank}: Error occurred: {e}\nTraceback: {tb}")
+    logger.error(f"FSDP RANK {dist_rank}: Error occurred: {e}\nTraceback: {tb}")
 finally:
     # Ensure that the process group is always destroyed
     if dist.is_initialized():
