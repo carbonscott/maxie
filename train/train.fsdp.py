@@ -75,7 +75,11 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 import torch.distributed as dist
 
 # -- Debug
-torch.autograd.set_detect_anomaly(True)    # [WARNING] Making it True may throw errors when using bfloat16
+# [WARNING] Making it True may throw errors when using float16.
+# Invalid gradients are expected to occur during mixed-precision training in
+# float16 and anomaly detection will thus report false errors.
+# Refer to https://discuss.pytorch.org/t/convolutionbackward0-returned-nan-values-in-its-0th-output/175571/4
+torch.autograd.set_detect_anomaly(False)
 
 # -- Reporting specific imports
 import colorama
