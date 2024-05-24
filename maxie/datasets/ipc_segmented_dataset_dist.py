@@ -37,15 +37,17 @@ class IPCDistributedSegmentedDatasetConfig:
         is_perf (bool)               : Flag to enable performance timing for transformations. Default is False.
         server_address (str)         : URL of the server to fetch data from. Defaults to 'http://localhost:5001'.
         loads_segment_in_init (bool) : Whether to load the first segment in the init.
+        entry_per_cycle (int)        : Number of entries to go through in each experiment.
     """
     path_json             : str
     seg_size              : int
     world_size            : int
     transforms            : List
-    is_perf               : bool = False
+    is_perf               : bool  = False
     server_address        : Tuple = ('localhost', 5000)
-    loads_segment_in_init : bool = False
-    debug                 : bool = False
+    loads_segment_in_init : bool  = False
+    entry_per_cycle       : int   = 1
+    debug                 : bool  = False
 
 class IPCDistributedSegmentedDataset(Dataset):
     """A dataset class designed for fetching and distributing segments of data
@@ -55,14 +57,15 @@ class IPCDistributedSegmentedDataset(Dataset):
     distributed processes.
     """
     def __init__(self, config: IPCDistributedSegmentedDatasetConfig):
-        self.path_json             = config.path_json
-        self.seg_size              = config.seg_size
-        self.world_size            = config.world_size
-        self.server_address        = config.server_address
-        self.transforms            = config.transforms
-        self.is_perf               = config.is_perf
-        self.loads_segment_in_init = config.loads_segment_in_init
-        self.debug                 = config.debug
+        self.path_json              = config.path_json
+        self.seg_size               = config.seg_size
+        self.world_size             = config.world_size
+        self.server_address         = config.server_address
+        self.transforms             = config.transforms
+        self.is_perf                = config.is_perf
+        self.loads_segment_in_init  = config.loads_segment_in_init
+        self.entry_per_cycle        = config.entry_per_cycle
+        self.debug                  = config.debug
 
         self.json_entry_list = self._load_json()
         self.total_size      = self._get_total_size()
@@ -90,6 +93,7 @@ class IPCDistributedSegmentedDataset(Dataset):
 
     def _init_entry_generator(self):
         PSANA_ACCESS_MODE = 'idx'
+        entry_gens = []
         for entry in self.json_entry_list:
             exp           = entry['exp'          ]
             run           = entry['run'          ]
@@ -98,8 +102,29 @@ class IPCDistributedSegmentedDataset(Dataset):
             num_events    = entry['num_events'   ]
             if events is None:
                 events = range(num_events)
-            for event in events:
-                yield (exp, run, PSANA_ACCESS_MODE, detector_name, event)
+            entry_gen = self._entry_generator(exp, run, PSANA_ACCESS_MODE, detector_name, events)
+            entry_gens.append(entry_gen)
+
+        return self._round_robin_generator(entry_gens, self.entry_per_cycle)
+
+    def _entry_generator(self, exp, run, psana_access_mode, detector_name, events):
+        for event in events:
+            yield (exp, run, psana_access_mode, detector_name, event)
+
+    def _round_robin_generator(self, entry_gens, entry_per_cycle):
+        """
+        Go through up to certain number of examples for each exp and
+        then move on to the next exp. Then, repeat this cycle until all
+        generators have been exhausted.
+        """
+        while len(entry_gens):
+            for entry_gen in entry_gens:
+                for _ in range(entry_per_cycle):
+                    try:
+                        yield next(entry_gen)
+                    except StopIteration:
+                        entry_gens.remove(entry_gen)
+                        break
 
     def calculate_end_idx(self):
         # Calculate and return the end index for the current dataset segment.
