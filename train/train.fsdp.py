@@ -118,6 +118,7 @@ batch_size           = dataset_config.get("batch_size")
 num_workers          = dataset_config.get("num_workers")
 seg_size             = dataset_config.get("seg_size")
 entry_per_cycle      = dataset_config.get("entry_per_cycle")
+debug_dataloading    = dataset_config.get("debug")
 server_address       = dataset_config.get("server_address")
 transforms_config    = dataset_config.get("transforms")
 num_patch            = transforms_config.get("num_patch")
@@ -316,7 +317,7 @@ ipc_dataset_train_config = IPCDistributedSegmentedDatasetConfig(
     server_address        = tuple(server_address),
     loads_segment_in_init = False,
     entry_per_cycle       = entry_per_cycle,
-    debug                 = True,
+    debug                 = debug_dataloading,
 )
 dataset_train = IPCDistributedSegmentedDataset(ipc_dataset_train_config)
 

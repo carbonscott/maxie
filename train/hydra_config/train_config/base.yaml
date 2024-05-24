@@ -11,6 +11,7 @@ dataset:
   path_eval      : experiments/datasets/test.json
   seg_size       : 20
   entry_per_cycle: 1
+  debug          : false
   server_address : [localhost, 5000]
   transforms:
     norm:
