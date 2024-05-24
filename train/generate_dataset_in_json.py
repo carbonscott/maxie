@@ -9,15 +9,15 @@ import argparse
 import random
 
 from joblib import Parallel, delayed
-from maxie.utils.data import split_list_into_chunk, split_dataset
+from maxie.utils.data import split_list_into_chunk, split_dataset, split_dataset_stratified
 
 parser = argparse.ArgumentParser(
     description="Generate a JSON dataset file."
 )
 parser.add_argument('--yaml', type = str, help='Path to the YAML dataset file')
 parser.add_argument('--num_cpus', type = int, help='Number of cpus used in processing these files.')
-parser.add_argument('--dir_output', type = str, help='Direcotry to save the output json files.')
-parser.add_argument('--train_frac', type = float, default = 0.8, help='Direcotry to save the output json files. (Default: 0.8)')
+parser.add_argument('--dir_output', type = str, help='Directory to save the output json files.')
+parser.add_argument('--train_frac', type = float, default = 0.8, help='Fraction of dataset used for training (Default: 0.8)')
 parser.add_argument('--seed',  type = lambda s: int(s) if s.isdigit() else None, default = None, help='Seed for shuffling the output.  (Default: None; no shuffle)')
 args = parser.parse_args()
 
@@ -47,7 +47,7 @@ batches = split_list_into_chunk(yaml_files, args.num_cpus)
 results = Parallel(n_jobs=num_cpus)(delayed(process_batch)(batch, batch_idx) for batch_idx, batch in enumerate(batches))
 dataset = [event for batch in results for event in batch]
 
-dataset_train, dataset_eval = split_dataset(dataset, train_frac)
+dataset_train, dataset_eval = split_dataset_stratified(dataset, train_frac)
 
 os.makedirs(dir_output, exist_ok=True)
 file_yaml        = os.path.basename(path_yaml)

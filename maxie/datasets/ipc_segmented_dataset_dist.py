@@ -3,6 +3,7 @@ import csv
 import json
 import socket
 import numpy as np
+import random
 
 from math import ceil
 from itertools import islice
@@ -90,6 +91,7 @@ class IPCDistributedSegmentedDataset(Dataset):
 
     def _init_entry_generator(self):
         PSANA_ACCESS_MODE = 'idx'
+        all_events = []
         for entry in self.json_entry_list:
             exp           = entry['exp'          ]
             run           = entry['run'          ]
@@ -99,7 +101,11 @@ class IPCDistributedSegmentedDataset(Dataset):
             if events is None:
                 events = range(num_events)
             for event in events:
-                yield (exp, run, PSANA_ACCESS_MODE, detector_name, event)
+                all_events.append((exp, run, PSANA_ACCESS_MODE, detector_name, event))
+        # Randomize the order of events occurring across all runs of all experiments in dataset
+        random.shuffle(all_events)
+        for event_tuple in all_events:
+            yield event_tuple
 
     def calculate_end_idx(self):
         # Calculate and return the end index for the current dataset segment.
