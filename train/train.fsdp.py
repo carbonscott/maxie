@@ -479,7 +479,7 @@ if from_resume:
         dataset_train.start_idx = training_state.start_idx
         dataset_train.end_idx   = training_state.end_idx
 
-        logger.info("loading from checkpoint.")
+        logger.info(f"Loading from checkpoint.")
         logger.info(f"PREV - last_epoch {last_epoch}, last_seg {dataset_train.start_idx}-{dataset_train.end_idx}, loss_min = {loss_min}")
 
 
@@ -768,8 +768,6 @@ try:
                     seg_end_idx   = dataset_eval_val.end_idx
                     logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean validation loss = {validate_loss:.8f}")
 
-                    if dist_rank == 0:
-                        logger.info("Saved checkpoint at: %s", dir_chkpt)
                 # -- Save checkpoint
                 if validate_loss < loss_min:
                     loss_min = validate_loss
@@ -785,6 +783,7 @@ try:
                     if dir_chkpt_prefix is not None: dir_chkpt = f"{dir_chkpt_prefix}.{dir_chkpt}"
                     path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
                     checkpointer.save(model, optimizer, scheduler, training_state, path_chkpt)
+                    logger.info(f"Saving checkpoint at {path_chkpt}.")
 
                 # All ranks wait until the end of evaluation by rank 0
                 # [WARNING] Expecting NCCL TIMEOUT ERROR if the evaluation takes too long
