@@ -62,9 +62,14 @@ from typing import Optional
 # -- Rest
 import pickle
 import os
+from datetime import datetime
 
 # -- Patch PyTorch
 from .patches.build_metadata import patch_build_metadata
+
+# -- Logging
+import logging
+logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------- #
 #  MEMORY TOOL
@@ -828,3 +833,44 @@ class ShardedStateDictCheckpoint:
         self._load_lr_scheduler_state_dict()
 
         dist.barrier()
+
+
+# ----------------------------------------------------------------------- #
+#  Logger
+# ----------------------------------------------------------------------- #
+def init_logger(uses_dist, dist_rank, device, fl_prefix = None, drc_log = "logs", level = 'info'):
+    timestamp = None
+
+    if dist_rank == 0:
+        # Create a timestamp to name the log file...
+        now = datetime.now()
+        timestamp = now.strftime("%Y_%m%d_%H%M_%S")
+
+    if uses_dist:
+        timestamp = broadcast_dict(dict(timestamp=timestamp), src = 0, device = device).get('timestamp')
+
+    # Set up the log file...
+    # ...base directory
+    base_log = f"{timestamp}"
+    if fl_prefix is not None: base_log = f"{fl_prefix}.{base_log}"
+    path_log = os.path.join(drc_log, base_log)
+
+    # ...path
+    os.makedirs(path_log, exist_ok = True)
+    fl_log = f"rank{dist_rank}.log"
+    path_log = os.path.join(path_log, fl_log)
+
+    # Config logging behaviors
+    log_level_spec = {
+        "info"  : logging.INFO,
+        "debug" : logging.DEBUG,
+    }
+    log_level = log_level_spec.get(level, logging.INFO)
+    logging.basicConfig( filename = path_log,
+                         filemode = 'w',
+                         format="%(asctime)s %(levelname)s %(name)s\n%(message)s",
+                         datefmt="%m/%d/%Y %H:%M:%S",
+                         level=log_level, )
+    logger = logging.getLogger(__name__)
+
+    return logger, timestamp
