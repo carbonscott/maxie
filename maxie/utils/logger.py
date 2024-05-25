@@ -8,7 +8,7 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-def init_logger(fl_prefix = None, drc_log = "logs", returns_timestamp = False):
+def init_logger(fl_prefix = None, drc_log = "logs", level = logging.INFO):
     # Create a timestamp to name the log file...
     now = datetime.now()
     timestamp = now.strftime("%Y_%m%d_%H%M_%S")
@@ -27,10 +27,10 @@ def init_logger(fl_prefix = None, drc_log = "logs", returns_timestamp = False):
                          filemode = 'w',
                          format="%(asctime)s %(levelname)s %(name)s\n%(message)s",
                          datefmt="%m/%d/%Y %H:%M:%S",
-                         level=logging.INFO, )
+                         level=level, )
     logger = logging.getLogger(__name__)
 
-    return timestamp if returns_timestamp else None
+    return timestamp
 
 
 class MetaLog:
