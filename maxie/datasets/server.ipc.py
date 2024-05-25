@@ -19,7 +19,7 @@ def get_psana_img(exp, run, access_mode, detector_name):
         psana_img_buffer[key] = PsanaImg(exp, run, access_mode, detector_name)
     return psana_img_buffer[key]
 
-def worker_process(server_socket):
+def worker_process(server_socket, timeout):
     # Ignore CTRL+C in the worker process
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
@@ -44,32 +44,48 @@ def worker_process(server_socket):
             event         = request_data.get('event')
             mode          = request_data.get('mode')
 
-            # Fetch psana image data
-            psana_img = get_psana_img(exp, run, access_mode, detector_name)
-            with Timer(tag=None, is_on=True) as t:
-                data = psana_img.get(event, None, mode)
+            # Send data or error message back to clients
+            shm = None
+            try:
+                # Fetch psana image data
+                psana_img = get_psana_img(exp, run, access_mode, detector_name)
+                with Timer(tag=None, is_on=True) as t:
+                    data = psana_img.get(event, None, mode)
 
-            # Keep numpy array in a shared memory
-            shm = shared_memory.SharedMemory(create=True, size=data.nbytes)
-            shared_array = np.ndarray(data.shape, dtype=data.dtype, buffer=shm.buf)
-            shared_array[:] = data
+                # Keep numpy array in a shared memory
+                shm = shared_memory.SharedMemory(create=True, size=data.nbytes)
+                shared_array = np.ndarray(data.shape, dtype=data.dtype, buffer=shm.buf)
+                shared_array[:] = data
 
-            response_data = json.dumps({
-                'name': shm.name,
-                'shape': data.shape,
-                'dtype': str(data.dtype)
-            })
+                response_data = json.dumps({
+                    'name': shm.name,
+                    'shape': data.shape,
+                    'dtype': str(data.dtype)
+                })
 
-            # Send response with shared memory details
-            connection.sendall(response_data.encode('utf-8'))
+                # Send response with shared memory details
+                connection.sendall(response_data.encode('utf-8'))
+
+            except Exception as e:
+                error_message = {
+                    "error": str(e),
+                    "traceback": traceback.format_exc()
+                }
+                connection.sendall(json.dumps(error_message).encode('utf-8'))
 
             # Wait for the client's acknowledgment
-            ack = connection.recv(1024).decode('utf-8')
-            if ack == "ACK":
-                print(f"Shared memory {shm.name} ready to unlink. Creation took {t.duration * 1e3} ms.")
-                unlink_shared_memory(shm.name)
-            else:
-                print("Did not receive proper acknowledgment from client.")
+            connection.settimeout(timeout)
+            try:
+                ack = connection.recv(1024).decode('utf-8')
+                if ack == "ACK":
+                    if shm is not None:
+                        print(f"Shared memory {shm.name} ready to unlink. Creation took {t.duration * 1e3} ms.")
+                else:
+                    print("Did not receive proper acknowledgment from client.")
+            except:
+                print("Did not receive ACK for error message within timeout.")
+
+            if shm is not None: unlink_shared_memory(shm.name)
 
         except Exception as e:
             print(f"Unexpected error: {e}")
@@ -83,7 +99,7 @@ def unlink_shared_memory(shm_name):
     except FileNotFoundError:
         pass
 
-def start_server(address, num_workers):
+def start_server(address, num_workers, timeout):
     # Init TCP socket, set reuse, bind, and listen for connections
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -93,7 +109,7 @@ def start_server(address, num_workers):
     # Create and start worker processes
     processes = []
     for _ in range(num_workers):
-        p = Process(target=worker_process, args=(server_socket,))
+        p = Process(target=worker_process, args=(server_socket, timeout))
         p.start()
         processes.append(p)
 
@@ -105,14 +121,16 @@ if __name__ == "__main__":
     parser.add_argument("--hostname"   , type = str, default='localhost', help = "Server hostname (Default: 'localhost').")
     parser.add_argument("--port"       , type = int, default=5000       , help = "Server port (Default: 5000).")
     parser.add_argument("--num_workers", type = int, default=5          , help = "Number of workers supporting data serving (Default: 5).")
+    parser.add_argument("--timeout",     type = int, default=5          , help = "Connection timeout (Default: 5 seconds).")
     args = parser.parse_args()
 
     hostname    = args.hostname
     port        = args.port
     num_workers = args.num_workers
+    timeout     = args.timeout
 
     server_address = (hostname, port)
-    processes, server_socket = start_server(server_address, num_workers)
+    processes, server_socket = start_server(server_address, num_workers, timeout)
 
     print(f"Server is running at {hostname}:{port} with {num_workers} workers.")
 
