@@ -22,6 +22,9 @@ from typing import Optional, List, Tuple
 from ..utils_fsdp import broadcast_dict
 from ..perf import Timer
 
+import logging
+logger = logging.getLogger(__name__)
+
 # ----------------------------------------------------------------------- #
 #  DATALOADER FOR TRAINING BY ALL RANKS
 # ----------------------------------------------------------------------- #
@@ -82,8 +85,12 @@ class IPCDistributedSegmentedDataset(Dataset):
         self.end_idx         = 0
         self.json_entry_gen  = None
         self.current_dataset = None
+        if self.debug:
+            logger.debug(f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] Dataset reset done.")
 
     def _load_json(self):
+        if self.debug:
+            logger.debug(f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] Loading json.")
         with open(self.path_json, 'r') as file:
             entry_list = json.load(file)
         return entry_list
@@ -92,6 +99,8 @@ class IPCDistributedSegmentedDataset(Dataset):
         return sum([entry['num_events'] if entry['events'] is None else len(entry['events']) for entry in self.json_entry_list]) # Use constants to represent the magic value
 
     def _init_entry_generator(self):
+        if self.debug:
+            logger.debug(f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] Initializing entry generator.")
         PSANA_ACCESS_MODE = 'idx'
         entry_gens = []
         for entry in self.json_entry_list:
@@ -135,10 +144,14 @@ class IPCDistributedSegmentedDataset(Dataset):
         return ceil(self.total_size / (self.seg_size * self.world_size))
 
     def update_dataset_segment(self):
+        if self.debug:
+            logger.debug(f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] Updating segment to {self.start_idx}-{self.end_idx}.")
         # Trick islice to return a subset of events at a time
         return list(islice(self.json_entry_gen, 0, self.end_idx - self.start_idx))
 
     def set_start_idx(self, start_idx):
+        if self.debug:
+            logger.debug(f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] Setting start idx to {start_idx}.")
         self.start_idx = start_idx
         self.end_idx   = self.calculate_end_idx()
 
@@ -166,7 +179,7 @@ class IPCDistributedSegmentedDataset(Dataset):
 
         # [DEBUG]
         if self.debug:
-            print(f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] exp={exp}, run={run}, detector_name={detector_name}, event={event}.")
+            logger.debug(f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] exp={exp}, run={run}, detector_name={detector_name}, event={event}.")
 
         # Apply transforms
         image_tensor = None
@@ -230,8 +243,8 @@ class IPCDistributedSegmentedDataset(Dataset):
                 response_json = json.loads(response_data)
 
                 if 'error' in response_json:
-                    print(f"Server error: {response_json['error']}")
-                    print(response_json['traceback'])
+                    logger.debug(f"Server error: {response_json['error']}")
+                    if response_json['traceback'] is not None: logger.debug(response_json['traceback'])
                 else:
                     # Use the JSON data to access the shared memory
                     shm_name = response_json['name']
