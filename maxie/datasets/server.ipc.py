@@ -53,6 +53,9 @@ def worker_process(server_socket, timeout):
                 with Timer(tag=None, is_on=True) as t:
                     data = psana_img.get(event, None, mode)
 
+                if data is None:
+                    raise ValueError("Received None from psana!!!")
+
                 # Keep numpy array in a shared memory
                 shm = shared_memory.SharedMemory(create=True, size=data.nbytes)
                 shared_array = np.ndarray(data.shape, dtype=data.dtype, buffer=shm.buf)
