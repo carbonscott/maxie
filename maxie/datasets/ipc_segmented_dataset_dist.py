@@ -229,28 +229,32 @@ class IPCDistributedSegmentedDataset(Dataset):
                 # Load the reponse data
                 response_json = json.loads(response_data)
 
-                # Use the JSON data to access the shared memory
-                shm_name = response_json['name']
-                shape    = response_json['shape']
-                dtype    = np.dtype(response_json['dtype'])
+                if 'error' in response_json:
+                    print(f"Server error: {response_json['error']}")
+                    print(response_json['traceback'])
+                else:
+                    # Use the JSON data to access the shared memory
+                    shm_name = response_json['name']
+                    shape    = response_json['shape']
+                    dtype    = np.dtype(response_json['dtype'])
 
-                # Initialize shared memory outside of try block to ensure it's in scope for finally block
-                shm = None
-                try:
-                    # Access the shared memory
-                    shm = shared_memory.SharedMemory(name=shm_name)
-                    data_array = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+                    # Initialize shared memory outside of try block to ensure it's in scope for finally block
+                    shm = None
+                    try:
+                        # Access the shared memory
+                        shm = shared_memory.SharedMemory(name=shm_name)
+                        data_array = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
 
-                    # Convert to numpy array (this creates a copy of the data)
-                    result = np.array(data_array)
-                finally:
-                    # Ensure shared memory is closed even if an exception occurs
-                    if shm:
-                        shm.close()
-                        shm.unlink()
+                        # Convert to numpy array (this creates a copy of the data)
+                        result = np.array(data_array)
+                    finally:
+                        # Ensure shared memory is closed even if an exception occurs
+                        if shm:
+                            shm.close()
+                            shm.unlink()
 
-            # Send acknowledgment after successfully accessing shared memory
-            sock.sendall("ACK".encode('utf-8'))
+                # Send acknowledgment after successfully accessing shared memory
+                sock.sendall("ACK".encode('utf-8'))
 
             return result
 
