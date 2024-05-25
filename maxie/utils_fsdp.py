@@ -873,4 +873,4 @@ def init_logger(uses_dist, dist_rank, device, fl_prefix = None, drc_log = "logs"
                          level=log_level, )
     logger = logging.getLogger(__name__)
 
-    return logger, timestamp
+    return timestamp
