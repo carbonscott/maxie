@@ -91,21 +91,45 @@ class IPCDistributedSegmentedDataset(Dataset):
 
     def _init_entry_generator(self):
         PSANA_ACCESS_MODE = 'idx'
-        all_events = []
-        for entry in self.json_entry_list:
-            exp           = entry['exp'          ]
-            run           = entry['run'          ]
-            detector_name = entry['detector_name']
-            events        = entry['events'       ]
-            num_events    = entry['num_events'   ]
-            if events is None:
-                events = range(num_events)
-            for event in events:
-                all_events.append((exp, run, PSANA_ACCESS_MODE, detector_name, event))
-        # Randomize the order of events occurring across all runs of all experiments in dataset
-        random.shuffle(all_events)
-        for event_tuple in all_events:
-            yield event_tuple
+        exp_queue = self.json_entry_list.copy()
+        for exp in exp_queue:
+            exp["curr_event_idx"] = 0
+            if exp["events"] is None:
+                exp["events"] = range(exp["num_events"])
+        events_per_round = exp_queue[0]["num_events"]//10 #Rough guideline for how many events from each exp to yield per round
+        # Begin round robin schedule
+        while len(exp_queue) > 0:
+            curr_exp = exp_queue.pop(0)
+            if curr_exp["curr_event_idx"] < curr_exp["num_events"]:
+                # If current experiment has unyielded events remaining, yield the next `events_per_round` events from the current experiment
+                exp = curr_exp["exp"]
+                run = curr_exp["run"]
+                detector_name = curr_exp["detector_name"]
+                curr_round_end_idx = min(curr_exp["curr_event_idx"] + events_per_round, curr_exp["num_events"])
+                for event_idx in range(curr_exp["curr_event_idx"], curr_round_end_idx):
+                    event = curr_exp["events"][event_idx]
+                    yield (exp, run, PSANA_ACCESS_MODE, detector_name, event)
+                curr_exp["curr_event_idx"] = curr_round_end_idx
+                exp_queue.append(curr_exp)
+            # Optionally, shuffle the order of experiments to avoid cyclic patterns in data
+            random.shuffle(exp_queue)
+            
+
+        # all_events = []
+        # for entry in self.json_entry_list:
+        #     exp           = entry['exp'          ]
+        #     run           = entry['run'          ]
+        #     detector_name = entry['detector_name']
+        #     events        = entry['events'       ]
+        #     num_events    = entry['num_events'   ]
+        #     if events is None:
+        #         events = range(num_events)
+        #     for event in events:
+        #         all_events.append((exp, run, PSANA_ACCESS_MODE, detector_name, event))
+        # # Randomize the order of events occurring across all runs of all experiments in dataset
+        # random.shuffle(all_events)
+        # for event_tuple in all_events:
+        #     yield event_tuple
 
     def calculate_end_idx(self):
         # Calculate and return the end index for the current dataset segment.
