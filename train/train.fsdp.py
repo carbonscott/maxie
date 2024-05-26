@@ -20,7 +20,6 @@ from datetime   import timedelta
 # -- maxie specific imports
 from maxie.datasets.ipc_segmented_dataset_dist import IPCDistributedSegmentedDatasetConfig, IPCDistributedSegmentedDataset, IPCDatasetConfig, IPCDataset
 from maxie.modeling.adapted_mae import AdaptedViTMAEForPreTrainingConfig, AdaptedViTMAEForPreTraining
-from maxie.utils.logger         import init_logger
 from maxie.utils.seed           import set_seed
 from maxie.utils.misc           import is_action_due
 from maxie.lr_scheduler         import CosineLRScheduler
@@ -33,6 +32,7 @@ from maxie.utils_fsdp           import (
     FullStateDictCheckpointConfig,
     FullStateDictCheckpoint,
     broadcast_dict,
+    init_logger,
 )
 
 # -- Torch specific imports
@@ -85,6 +85,7 @@ torch.autograd.set_detect_anomaly(False)
 import colorama
 colorama.init(autoreset=True)
 
+# -- Get the logger
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------- #
@@ -105,8 +106,7 @@ with open(fl_yaml, 'r') as fh:
 # -- Checkpoint
 chkpt_config        = config.get("checkpoint")
 dir_root_chkpt      = chkpt_config.get("directory")
-fl_chkpt_prefix     = chkpt_config.get("filename_prefix")
-dir_chkpt_prefix    = chkpt_config.get("dir_chkpt_prefix")
+fl_chkpt_prefix     = chkpt_config.get("prefix")
 path_chkpt_prev     = chkpt_config.get("path_chkpt_prev")
 chkpt_saving_period = chkpt_config.get("chkpt_saving_period")
 
@@ -164,8 +164,9 @@ dist_dtype             = dist_config.get("dtype")
 
 # -- Logging
 logging_config = config.get("logging")
-drc_log       = logging_config.get("directory")
-fl_log_prefix = logging_config.get("filename_prefix")
+drc_log        = logging_config.get("directory")
+fl_log_prefix  = logging_config.get("prefix")
+log_level      = logging_config.get("level")
 
 # -- Misc
 misc_config = config.get("misc")
@@ -208,12 +209,12 @@ if uses_dist:
                             world_size  = dist_world_size,
                             timeout     = timedelta(seconds=1800),
                             init_method = "env://",)
-    logger.debug(f"RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
+    print(f"RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
 else:
     dist_rank       = 0
     dist_local_rank = 0
     dist_world_size = 1
-    logger.info(f"NO FSDP is used.  RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
+    print(f"NO FSDP is used.  RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
 
 # --- Set up GPU device
 gpu_idx = dist_local_rank % torch.cuda.device_count()    # dist_local_rank is node-centric, whereas torch.cuda.device_count() is resource-centeric (on LSF)
@@ -274,18 +275,15 @@ backward_prefetch = BackwardPrefetch.BACKWARD_PRE
 # ----------------------------------------------------------------------- #
 #  LOGGING
 # ----------------------------------------------------------------------- #
-timestamp = None
-if dist_rank == 0:
-    # Fetch the current timestamp...
-    timestamp = init_logger(fl_prefix = fl_log_prefix, drc_log = drc_log, returns_timestamp = True)
+# Fetch the current timestamp...
+timestamp = init_logger(uses_dist, dist_rank, device, fl_prefix = fl_log_prefix, drc_log = drc_log, level = log_level)
 
+if dist_rank == 0:
     # Convert dictionary to yaml formatted string...
     config_yaml = yaml.dump(config)
 
     # Log the config...
     logger.info(config_yaml)
-timestamp = broadcast_dict(dict(timestamp=timestamp), src = 0, device = device).get('timestamp')
-
 
 # ----------------------------------------------------------------------- #
 #  DATASET
@@ -334,6 +332,8 @@ ipc_dataset_eval_config = IPCDistributedSegmentedDatasetConfig(
     is_perf               = True,
     server_address        = tuple(server_address),
     loads_segment_in_init = False,
+    entry_per_cycle       = entry_per_cycle,
+    debug                 = debug_dataloading,
 )
 dataset_eval_val = IPCDistributedSegmentedDataset(ipc_dataset_eval_config)
 
@@ -628,6 +628,7 @@ def is_last_batch(batch_idx, num_batches):
 # ----------------------------------------------------------------------- #
 #  TRAINING LOOP
 # ----------------------------------------------------------------------- #
+batch_input_shape = None
 logger.debug(f'[RANK {dist_rank}] Ready for training loop...')
 try:
     for epoch in tqdm.tqdm(range(last_epoch+1, max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
@@ -658,53 +659,76 @@ try:
             # Shuffle the training example
             sampler.set_epoch(epoch)
 
+            # [WORKAROUND]
+            # FIXME: Better data cleaning will eliminate None batch
+            if dist_rank == 0:
+                dataset_eval_train.reset()
+                dataset_eval_train.set_start_idx(0)
+                dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = None, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
+                dataloader_eval_iter = iter(dataloader_eval)
+                logger.debug(f"[RANK {dist_rank}] Identifying the shape of batch_data...")
+                while batch_input_shape is None:
+                    try:
+                        batch_data = next(dataloader_eval_iter)
+                        if batch_data is not None:
+                            batch_input_shape = batch_data.shape
+                            logger.debug(f"[RANK {dist_rank}] Shape of batch_data = {batch_input_shape}")
+                    except StopIteration:
+                        raise ValueError(f"[RANK {dist_rank}] No valid eval data found for obtaining the input shape!!!")
+                        break
+            batch_input_shape = broadcast_dict(dict(batch_input_shape=batch_input_shape), src = 0, device = device).get('batch_input_shape')
+
             grad_nosync_counter = 0
+            logger.debug(f"[RANK {dist_rank}] Start processing {len(dataloader)} batches at epoch {epoch}, seg {seg}.")
             for batch_idx, batch_data in tqdm.tqdm(enumerate(dataloader), total = len(dataloader), desc = f'[RANK {dist_rank}] Mini batch'):    # (B, C, H, W)
                 # -- Train one mini batch
-                # Skip None batch
+                # Create dummy data for a None batch
                 # FIXME: Better data cleaning will eliminate None batch
-                if batch_data is not None:
-                    batch_input = batch_data
-                    batch_input = batch_input.to(device, non_blocking = True)
+                if batch_data is None:
+                    logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {batch_idx}.  Creating a dummy input!!!")
+                    batch_data = torch.zeros(batch_input_shape, device = device)
 
-                    # Conditionally turn off grad sync for grad accumulation to simulate a larger batch unless the sync is due or the last batch
-                    # Refer to https://github.com/pytorch/pytorch/blob/6c4f43f82675b5fcfe8cf3e5983d0c0f326408aa/test/distributed/fsdp/test_fsdp_grad_acc.py#L180
-                    is_grad_sync_required = is_last_batch(batch_idx, len(dataloader)) or is_action_due(grad_nosync_counter, grad_accum_steps)
-                    with grad_sync_context(is_grad_sync_required):
-                        # Forward
-                        with autocast_context:
-                            batch_output = model(batch_input)
-                            loss = batch_output.loss  # Refer to https://github.com/huggingface/transformers/blob/e34da3ee3c9d2d628fdbeb60cee45c4f8f32945a/src/transformers/models/vit_mae/modeling_vit_mae.py#L1001
-                            loss = loss / grad_accum_steps  # scale the loss to account for gradient accumulation
+                batch_input = batch_data
+                batch_input = batch_input.to(device, non_blocking = True)
 
-                        # Log the training loop loss
-                        if dist_rank == 0:
-                            seg_start_idx = dataset_train.start_idx
-                            seg_end_idx   = dataset_train.end_idx
-                            logger.info(f"[RANK {dist_rank}] LOSS:TRAIN - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mini_batch {batch_idx}, mean train loss = {loss:.8f} grad_sync = {is_grad_sync_required}")
+                # Conditionally turn off grad sync for grad accumulation to simulate a larger batch unless the sync is due or the last batch
+                # Refer to https://github.com/pytorch/pytorch/blob/6c4f43f82675b5fcfe8cf3e5983d0c0f326408aa/test/distributed/fsdp/test_fsdp_grad_acc.py#L180
+                is_grad_sync_required = is_last_batch(batch_idx, len(dataloader)) or is_action_due(grad_nosync_counter, grad_accum_steps)
+                with grad_sync_context(is_grad_sync_required):
+                    # Forward
+                    with autocast_context:
+                        batch_output = model(batch_input)
+                        loss = batch_output.loss  # Refer to https://github.com/huggingface/transformers/blob/e34da3ee3c9d2d628fdbeb60cee45c4f8f32945a/src/transformers/models/vit_mae/modeling_vit_mae.py#L1001
+                        loss = loss / grad_accum_steps  # scale the loss to account for gradient accumulation
 
-                        # Backward
-                        scaler.scale(loss).backward()
+                    # Log the training loop loss
+                    if dist_rank == 0:
+                        seg_start_idx = dataset_train.start_idx
+                        seg_end_idx   = dataset_train.end_idx
+                        logger.info(f"[RANK {dist_rank}] LOSS:TRAIN - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mini_batch {batch_idx}, mean train loss = {loss:.8f} grad_sync = {is_grad_sync_required}")
 
-                    # Increment the grad nosync counter
-                    grad_nosync_counter += 1
+                    # Backward
+                    scaler.scale(loss).backward()
 
-                    # Conditional parameter updates when grad sync is required
-                    if is_grad_sync_required:
-                        # Grad clipping
-                        if grad_clip != 0.0:
-                            scaler.unscale_(optimizer)
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                # Increment the grad nosync counter
+                grad_nosync_counter += 1
 
-                        # Update parameters
-                        scaler.step(optimizer)
-                        scaler.update()
+                # Conditional parameter updates when grad sync is required
+                if is_grad_sync_required:
+                    # Grad clipping
+                    if grad_clip != 0.0:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-                        # Flush the gradients
-                        optimizer.zero_grad(set_to_none=True)
+                    # Update parameters
+                    scaler.step(optimizer)
+                    scaler.update()
 
-                        # Reset grad accum counter
-                        grad_nosync_counter = 0
+                    # Flush the gradients
+                    optimizer.zero_grad(set_to_none=True)
+
+                    # Reset grad accum counter
+                    grad_nosync_counter = 0
 
             # -- Update lr every few seg (X segs = one step/iteration)
             total_seg = seg + epoch * dataset_train.num_seg
@@ -788,7 +812,7 @@ try:
                     training_state.loss_min  = loss_min
 
                     dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
-                    if dir_chkpt_prefix is not None: dir_chkpt = f"{dir_chkpt_prefix}.{dir_chkpt}"
+                    if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
                     path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
                     checkpointer.save(model, optimizer, scheduler, training_state, path_chkpt)
                     logger.info(f"Saving checkpoint at {path_chkpt}.")
