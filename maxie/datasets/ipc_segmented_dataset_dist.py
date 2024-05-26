@@ -90,46 +90,39 @@ class IPCDistributedSegmentedDataset(Dataset):
         return sum([entry['num_events'] if entry['events'] is None else len(entry['events']) for entry in self.json_entry_list]) # Use constants to represent the magic value
 
     def _init_entry_generator(self):
+       # Yield entries from input JSON, alternating between experiment runs in a round-robin fashion
         PSANA_ACCESS_MODE = 'idx'
-        exp_queue = self.json_entry_list.copy()
-        for exp in exp_queue:
-            exp["curr_event_idx"] = 0
-            if exp["events"] is None:
-                exp["events"] = range(exp["num_events"])
-        events_per_round = exp_queue[0]["num_events"]//10 #Rough guideline for how many events from each exp to yield per round
+        # Rough guideline for how many events from each experiment run to yield per round
+        events_per_round = self.json_entry_list[0]["num_events"]//20 
+        
+        for entry_idx, entry in enumerate(self.json_entry_list):
+            entry["idx"] = entry_idx
+            entry["curr_event_idx"] = 0
+            if entry["events"] is None:
+                entry["events"] = range(entry["num_events"])
+            elif len(entry["events"]) != entry["num_events"]:
+                # Some experiment runs have fewer recorded events than documented
+                entry["num_events"] = len(entry["events"])
+        # Store a unique identifier for each experiment run in a queue
+        exp_run_queue = list(range(len(self.json_entry_list)))
+        
         # Begin round robin schedule
-        while len(exp_queue) > 0:
-            curr_exp = exp_queue.pop(0)
-            if curr_exp["curr_event_idx"] < curr_exp["num_events"]:
-                # If current experiment has unyielded events remaining, yield the next `events_per_round` events from the current experiment
-                exp = curr_exp["exp"]
-                run = curr_exp["run"]
-                detector_name = curr_exp["detector_name"]
-                curr_round_end_idx = min(curr_exp["curr_event_idx"] + events_per_round, curr_exp["num_events"])
-                for event_idx in range(curr_exp["curr_event_idx"], curr_round_end_idx):
-                    event = curr_exp["events"][event_idx]
+        while len(exp_run_queue) > 0:
+            curr_exp_run_idx = exp_run_queue.pop(0)
+            curr_exp_run = self.json_entry_list[curr_exp_run_idx]
+            if curr_exp_run["curr_event_idx"] < curr_exp_run["num_events"]:
+                # If current experiment run has unyielded events remaining, yield its next `events_per_round` events
+                exp = curr_exp_run["exp"]
+                run = curr_exp_run["run"]
+                detector_name = curr_exp_run["detector_name"]
+                curr_round_end_idx = min(curr_exp_run["curr_event_idx"] + events_per_round, curr_exp_run["num_events"])
+                for event_idx in range(curr_exp_run["curr_event_idx"], curr_round_end_idx):
+                    event = curr_exp_run["events"][event_idx]
                     yield (exp, run, PSANA_ACCESS_MODE, detector_name, event)
-                curr_exp["curr_event_idx"] = curr_round_end_idx
-                exp_queue.append(curr_exp)
-            # Optionally, shuffle the order of experiments to avoid cyclic patterns in data
-            random.shuffle(exp_queue)
-            
-
-        # all_events = []
-        # for entry in self.json_entry_list:
-        #     exp           = entry['exp'          ]
-        #     run           = entry['run'          ]
-        #     detector_name = entry['detector_name']
-        #     events        = entry['events'       ]
-        #     num_events    = entry['num_events'   ]
-        #     if events is None:
-        #         events = range(num_events)
-        #     for event in events:
-        #         all_events.append((exp, run, PSANA_ACCESS_MODE, detector_name, event))
-        # # Randomize the order of events occurring across all runs of all experiments in dataset
-        # random.shuffle(all_events)
-        # for event_tuple in all_events:
-        #     yield event_tuple
+                curr_exp_run["curr_event_idx"] = curr_round_end_idx
+                exp_run_queue.append(curr_exp_run_idx)
+            # Optionally, shuffle the order of experiment runs to avoid cyclic patterns in data
+            random.shuffle(exp_run_queue)
 
     def calculate_end_idx(self):
         # Calculate and return the end index for the current dataset segment.
