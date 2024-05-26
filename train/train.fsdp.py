@@ -661,22 +661,23 @@ try:
 
             # [WORKAROUND]
             # FIXME: Better data cleaning will eliminate None batch
-            if dist_rank == 0:
-                dataset_eval_train.reset()
-                dataset_eval_train.set_start_idx(0)
-                dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = None, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
-                dataloader_eval_iter = iter(dataloader_eval)
-                logger.debug(f"[RANK {dist_rank}] Identifying the shape of batch_data...")
-                while batch_input_shape is None:
-                    try:
-                        batch_data = next(dataloader_eval_iter)
-                        if batch_data is not None:
-                            batch_input_shape = batch_data.shape
-                            logger.debug(f"[RANK {dist_rank}] Shape of batch_data = {batch_input_shape}")
-                    except StopIteration:
-                        raise ValueError(f"[RANK {dist_rank}] No valid eval data found for obtaining the input shape!!!")
-                        break
-            batch_input_shape = broadcast_dict(dict(batch_input_shape=batch_input_shape), src = 0, device = device).get('batch_input_shape')
+            if batch_input_shape is None:
+                if dist_rank == 0:
+                    dataset_eval_train.reset()
+                    dataset_eval_train.set_start_idx(0)
+                    dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = None, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
+                    dataloader_eval_iter = iter(dataloader_eval)
+                    logger.debug(f"[RANK {dist_rank}] Identifying the shape of batch_data...")
+                    while batch_input_shape is None:
+                        try:
+                            batch_data = next(dataloader_eval_iter)
+                            if batch_data is not None:
+                                batch_input_shape = batch_data.shape
+                                logger.debug(f"[RANK {dist_rank}] Shape of batch_data = {batch_input_shape}")
+                        except StopIteration:
+                            raise ValueError(f"[RANK {dist_rank}] No valid eval data found for obtaining the input shape!!!")
+                            break
+                batch_input_shape = broadcast_dict(dict(batch_input_shape=batch_input_shape), src = 0, device = device).get('batch_input_shape')
 
             grad_nosync_counter = 0
             logger.debug(f"[RANK {dist_rank}] Start processing {len(dataloader)} batches at epoch {epoch}, seg {seg}.")
