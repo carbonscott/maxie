@@ -20,7 +20,6 @@ from datetime   import timedelta
 # -- maxie specific imports
 from maxie.datasets.ipc_segmented_dataset_dist import IPCDistributedSegmentedDatasetConfig, IPCDistributedSegmentedDataset, IPCDatasetConfig, IPCDataset
 from maxie.modeling.adapted_mae import AdaptedViTMAEForPreTrainingConfig, AdaptedViTMAEForPreTraining
-from maxie.utils.logger         import init_logger
 from maxie.utils.seed           import set_seed
 from maxie.utils.misc           import is_action_due
 from maxie.lr_scheduler         import CosineLRScheduler
@@ -33,6 +32,7 @@ from maxie.utils_fsdp           import (
     FullStateDictCheckpointConfig,
     FullStateDictCheckpoint,
     broadcast_dict,
+    init_logger,
 )
 
 # -- Torch specific imports
@@ -75,12 +75,17 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 import torch.distributed as dist
 
 # -- Debug
-torch.autograd.set_detect_anomaly(True)    # [WARNING] Making it True may throw errors when using bfloat16
+# [WARNING] Making it True may throw errors when using float16.
+# Invalid gradients are expected to occur during mixed-precision training in
+# float16 and anomaly detection will thus report false errors.
+# Refer to https://discuss.pytorch.org/t/convolutionbackward0-returned-nan-values-in-its-0th-output/175571/4
+torch.autograd.set_detect_anomaly(False)
 
 # -- Reporting specific imports
 import colorama
 colorama.init(autoreset=True)
 
+# -- Get the logger
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------- #
@@ -101,8 +106,7 @@ with open(fl_yaml, 'r') as fh:
 # -- Checkpoint
 chkpt_config        = config.get("checkpoint")
 dir_root_chkpt      = chkpt_config.get("directory")
-fl_chkpt_prefix     = chkpt_config.get("filename_prefix")
-dir_chkpt_prefix    = chkpt_config.get("dir_chkpt_prefix")
+fl_chkpt_prefix     = chkpt_config.get("prefix")
 path_chkpt_prev     = chkpt_config.get("path_chkpt_prev")
 chkpt_saving_period = chkpt_config.get("chkpt_saving_period")
 
@@ -113,6 +117,8 @@ path_eval_json       = dataset_config.get("path_eval")
 batch_size           = dataset_config.get("batch_size")
 num_workers          = dataset_config.get("num_workers")
 seg_size             = dataset_config.get("seg_size")
+entry_per_cycle      = dataset_config.get("entry_per_cycle")
+debug_dataloading    = dataset_config.get("debug")
 server_address       = dataset_config.get("server_address")
 transforms_config    = dataset_config.get("transforms")
 num_patch            = transforms_config.get("num_patch")
@@ -158,8 +164,9 @@ dist_dtype             = dist_config.get("dtype")
 
 # -- Logging
 logging_config = config.get("logging")
-drc_log       = logging_config.get("directory")
-fl_log_prefix = logging_config.get("filename_prefix")
+drc_log        = logging_config.get("directory")
+fl_log_prefix  = logging_config.get("prefix")
+log_level      = logging_config.get("level")
 
 # -- Misc
 misc_config = config.get("misc")
@@ -268,23 +275,20 @@ backward_prefetch = BackwardPrefetch.BACKWARD_PRE
 # ----------------------------------------------------------------------- #
 #  LOGGING
 # ----------------------------------------------------------------------- #
-timestamp = None
-if dist_rank == 0:
-    # Fetch the current timestamp...
-    timestamp = init_logger(fl_prefix = fl_log_prefix, drc_log = drc_log, returns_timestamp = True)
+# Fetch the current timestamp...
+timestamp = init_logger(uses_dist, dist_rank, device, fl_prefix = fl_log_prefix, drc_log = drc_log, level = log_level)
 
+if dist_rank == 0:
     # Convert dictionary to yaml formatted string...
     config_yaml = yaml.dump(config)
 
     # Log the config...
     logger.info(config_yaml)
-timestamp = broadcast_dict(dict(timestamp=timestamp), src = 0, device = device).get('timestamp')
-
 
 # ----------------------------------------------------------------------- #
 #  DATASET
 # ----------------------------------------------------------------------- #
-print(f'[RANK {dist_rank}] Confguring dataset...')
+logger.debug(f'[RANK {dist_rank}] Configuring dataset...')
 # -- Seeding
 base_seed  = 0
 world_seed = base_seed + seed_offset
@@ -310,6 +314,8 @@ ipc_dataset_train_config = IPCDistributedSegmentedDatasetConfig(
     is_perf               = True,
     server_address        = tuple(server_address),
     loads_segment_in_init = False,
+    entry_per_cycle       = entry_per_cycle,
+    debug                 = debug_dataloading,
 )
 dataset_train = IPCDistributedSegmentedDataset(ipc_dataset_train_config)
 
@@ -326,6 +332,8 @@ ipc_dataset_eval_config = IPCDistributedSegmentedDatasetConfig(
     is_perf               = True,
     server_address        = tuple(server_address),
     loads_segment_in_init = False,
+    entry_per_cycle       = entry_per_cycle,
+    debug                 = debug_dataloading,
 )
 dataset_eval_val = IPCDistributedSegmentedDataset(ipc_dataset_eval_config)
 
@@ -338,7 +346,7 @@ def custom_collate(batch):
 # ----------------------------------------------------------------------- #
 #  MODEL
 # ----------------------------------------------------------------------- #
-print(f'[RANK {dist_rank}] Confguring model...')
+logger.debug(f'[RANK {dist_rank}] Configuring model...')
 # -- Config the model
 model_config = AdaptedViTMAEForPreTrainingConfig(model_name = model_name)
 model = AdaptedViTMAEForPreTraining(model_config)
@@ -352,7 +360,7 @@ if version.parse(torch_version) <= version.parse("2.0.1"):
             param.requires_grad = True
 
 if dist_rank == 0:
-    print(f"{sum(p.numel() for p in model.parameters())/1e6} M pamameters.")
+    logger.debug(f"{sum(p.numel() for p in model.parameters())/1e6} M pamameters.")
 
 # -- Mixed precision
 mixed_precision_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dist_dtype]
@@ -367,7 +375,7 @@ scaler = ShardedGradScaler(enabled=(dist_dtype == 'float16'))
 
 # -- Compile the model
 if compiles_model:
-    print("Compiling the model...")
+    logger.debug("Compiling the model...")
     model = torch.compile(model) # requires PyTorch 2.0
 
 # -- CHECKPOINT (FULL STATE DICT)
@@ -407,7 +415,7 @@ if uses_dist:
     )
 
     sharded_param_count = sum(p.numel() for p in model.module.parameters())
-    print(f"RANK {dist_rank} - sharded parameter count: {sharded_param_count*1e-6} M.")
+    logger.debug(f"RANK {dist_rank} - sharded parameter count: {sharded_param_count*1e-6} M.")
 
     dist.barrier()
 
@@ -426,19 +434,19 @@ if ac_layer is not None:
     )
 
 if dist_rank == 0:
-    print(f"Current timestamp: {timestamp}")
+    logger.debug(f"Current timestamp: {timestamp}")
 
 
 # ----------------------------------------------------------------------- #
 #  CRITERION (LOSS)
 # ----------------------------------------------------------------------- #
-print(f'[RANK {dist_rank}] Confguring criterion (Skip, it is configured in the model)...')
+logger.debug(f'[RANK {dist_rank}] Configuring criterion (Skip, it is configured in the model)...')
 
 
 # ----------------------------------------------------------------------- #
 #  Optimizer
 # ----------------------------------------------------------------------- #
-print(f'[RANK {dist_rank}] Confguring optimizer...')
+logger.debug(f'[RANK {dist_rank}] Configuring optimizer...')
 param_iter = model.parameters()
 optimizer = optim.AdamW(param_iter,
                         lr = lr,
@@ -479,6 +487,7 @@ if from_resume:
         dataset_train.start_idx = training_state.start_idx
         dataset_train.end_idx   = training_state.end_idx
 
+        logger.info(f"Loading from checkpoint.")
         logger.info(f"PREV - last_epoch {last_epoch}, last_seg {dataset_train.start_idx}-{dataset_train.end_idx}, loss_min = {loss_min}")
 
 
@@ -497,7 +506,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     dist_world_size = kwargs.get('dist_world_size')
 
     if dist_rank == 0:
-        print(f"[RANK {dist_rank}] - EVAL Entering")
+        logger.debug(f"[RANK {dist_rank}] - EVAL Entering")
     model.eval()
 
     # !!!!!!!!!!!!!!!
@@ -524,7 +533,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         if enum_idx >= max_iter: break
 
         if dist_rank == 0:
-            print(f"[RANK {dist_rank}] EVAL - Pre fetching mini_batch {enum_idx}")
+            logger.debug(f"[RANK {dist_rank}] EVAL - Pre fetching mini_batch {enum_idx}")
 
         # Skip a batch if it's a None
         if batch_data is None: continue
@@ -533,15 +542,15 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         batch_input = batch_input.to(device, non_blocking = True)
 
         if dist_rank == 0:
-            print(f"[RANK {dist_rank}] EVAl - Post fetching")
+            logger.debug(f"[RANK {dist_rank}] EVAL - Post fetching")
 
         with autocast_context:
             if dist_rank == 0:
-                print(f"[RANK {dist_rank}] EVAL - Forwarding")
+                logger.debug(f"[RANK {dist_rank}] EVAL - Forwarding")
             batch_output = model(batch_input)
 
             if dist_rank == 0:
-                print(f"[RANK {dist_rank}] EVAL - Loss")
+                logger.debug(f"[RANK {dist_rank}] EVAL - Loss")
             loss = batch_output.loss
 
         # !!!!!!!!!!!!!!!
@@ -579,7 +588,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     world_nan_counter = torch.tensor(0, dtype = torch.int, device = device)
     local_nan_masks = torch.isnan(local_losses_mean)
     if local_nan_masks.any().item():
-        print(f"[RANK {dist_rank}] EVAL ERROR: NaN encountered!!!")
+        logger.error(f"[RANK {dist_rank}] EVAL ERROR: NaN encountered!!!")
         world_nan_counter += 1
         local_losses_mean  = 0.0    # Contribute to nothing in the reduced sum
     dist.all_reduce(world_nan_counter, op=dist.ReduceOp.SUM)
@@ -619,7 +628,8 @@ def is_last_batch(batch_idx, num_batches):
 # ----------------------------------------------------------------------- #
 #  TRAINING LOOP
 # ----------------------------------------------------------------------- #
-print(f'[RANK {dist_rank}] Ready for training loop...')
+batch_input_shape = None
+logger.debug(f'[RANK {dist_rank}] Ready for training loop...')
 try:
     for epoch in tqdm.tqdm(range(last_epoch+1, max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
         # -- Train one epoch
@@ -640,7 +650,7 @@ try:
             dataset_train.set_start_idx(dataset_train.end_idx)
 
             if dist_rank == 0:
-                print(f"Working on segment: {dataset_train.start_idx}:{dataset_train.end_idx}; Total size: {dataset_train.total_size}")
+                logger.info(f"Working on segment: {dataset_train.start_idx}:{dataset_train.end_idx}; Total size: {dataset_train.total_size}")
 
             # Split sampler across ranks
             sampler = torch.utils.data.DistributedSampler(dataset_train, shuffle=True)
@@ -649,53 +659,77 @@ try:
             # Shuffle the training example
             sampler.set_epoch(epoch)
 
+            # [WORKAROUND]
+            # FIXME: Better data cleaning will eliminate None batch
+            if batch_input_shape is None:
+                if dist_rank == 0:
+                    dataset_eval_train.reset()
+                    dataset_eval_train.set_start_idx(0)
+                    dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = None, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
+                    dataloader_eval_iter = iter(dataloader_eval)
+                    logger.debug(f"[RANK {dist_rank}] Identifying the shape of batch_data...")
+                    while batch_input_shape is None:
+                        try:
+                            batch_data = next(dataloader_eval_iter)
+                            if batch_data is not None:
+                                batch_input_shape = batch_data.shape
+                                logger.debug(f"[RANK {dist_rank}] Shape of batch_data = {batch_input_shape}")
+                        except StopIteration:
+                            raise ValueError(f"[RANK {dist_rank}] No valid eval data found for obtaining the input shape!!!")
+                            break
+                batch_input_shape = broadcast_dict(dict(batch_input_shape=batch_input_shape), src = 0, device = device).get('batch_input_shape')
+
             grad_nosync_counter = 0
+            logger.debug(f"[RANK {dist_rank}] Start processing {len(dataloader)} batches at epoch {epoch}, seg {seg}.")
             for batch_idx, batch_data in tqdm.tqdm(enumerate(dataloader), total = len(dataloader), desc = f'[RANK {dist_rank}] Mini batch'):    # (B, C, H, W)
                 # -- Train one mini batch
-                # Skip None batch
+                # Create dummy data for a None batch
                 # FIXME: Better data cleaning will eliminate None batch
-                if batch_data is not None:
-                    batch_input = batch_data
-                    batch_input = batch_input.to(device, non_blocking = True)
+                if batch_data is None:
+                    logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {batch_idx}.  Creating a dummy input!!!")
+                    batch_data = torch.zeros(batch_input_shape, device = device)
 
-                    # Conditionally turn off grad sync for grad accumulation to simulate a larger batch unless the sync is due or the last batch
-                    # Refer to https://github.com/pytorch/pytorch/blob/6c4f43f82675b5fcfe8cf3e5983d0c0f326408aa/test/distributed/fsdp/test_fsdp_grad_acc.py#L180
-                    is_grad_sync_required = is_last_batch(batch_idx, len(dataloader)) or is_action_due(grad_nosync_counter, grad_accum_steps)
-                    with grad_sync_context(is_grad_sync_required):
-                        # Forward
-                        with autocast_context:
-                            batch_output = model(batch_input)
-                            loss = batch_output.loss  # Refer to https://github.com/huggingface/transformers/blob/e34da3ee3c9d2d628fdbeb60cee45c4f8f32945a/src/transformers/models/vit_mae/modeling_vit_mae.py#L1001
-                            loss = loss / grad_accum_steps  # scale the loss to account for gradient accumulation
+                batch_input = batch_data
+                batch_input = batch_input.to(device, non_blocking = True)
 
-                        # Log the training loop loss
-                        if dist_rank == 0:
-                            seg_start_idx = dataset_train.start_idx
-                            seg_end_idx   = dataset_train.end_idx
-                            logger.info(f"[RANK {dist_rank}] LOSS:TRAIN - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mini_batch {batch_idx}, mean train loss = {loss:.8f} grad_sync = {is_grad_sync_required}")
+                # Conditionally turn off grad sync for grad accumulation to simulate a larger batch unless the sync is due or the last batch
+                # Refer to https://github.com/pytorch/pytorch/blob/6c4f43f82675b5fcfe8cf3e5983d0c0f326408aa/test/distributed/fsdp/test_fsdp_grad_acc.py#L180
+                is_grad_sync_required = is_last_batch(batch_idx, len(dataloader)) or is_action_due(grad_nosync_counter, grad_accum_steps)
+                with grad_sync_context(is_grad_sync_required):
+                    # Forward
+                    with autocast_context:
+                        batch_output = model(batch_input)
+                        loss = batch_output.loss  # Refer to https://github.com/huggingface/transformers/blob/e34da3ee3c9d2d628fdbeb60cee45c4f8f32945a/src/transformers/models/vit_mae/modeling_vit_mae.py#L1001
+                        loss = loss / grad_accum_steps  # scale the loss to account for gradient accumulation
 
-                        # Backward
-                        scaler.scale(loss).backward()
+                    # Log the training loop loss
+                    if dist_rank == 0:
+                        seg_start_idx = dataset_train.start_idx
+                        seg_end_idx   = dataset_train.end_idx
+                        logger.info(f"[RANK {dist_rank}] LOSS:TRAIN - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mini_batch {batch_idx}, mean train loss = {loss:.8f} grad_sync = {is_grad_sync_required}")
 
-                    # Increment the grad nosync counter
-                    grad_nosync_counter += 1
+                    # Backward
+                    scaler.scale(loss).backward()
 
-                    # Conditional parameter updates when grad sync is required
-                    if is_grad_sync_required:
-                        # Grad clipping
-                        if grad_clip != 0.0:
-                            scaler.unscale_(optimizer)
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                # Increment the grad nosync counter
+                grad_nosync_counter += 1
 
-                        # Update parameters
-                        scaler.step(optimizer)
-                        scaler.update()
+                # Conditional parameter updates when grad sync is required
+                if is_grad_sync_required:
+                    # Grad clipping
+                    if grad_clip != 0.0:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-                        # Flush the gradients
-                        optimizer.zero_grad(set_to_none=True)
+                    # Update parameters
+                    scaler.step(optimizer)
+                    scaler.update()
 
-                        # Reset grad accum counter
-                        grad_nosync_counter = 0
+                    # Flush the gradients
+                    optimizer.zero_grad(set_to_none=True)
+
+                    # Reset grad accum counter
+                    grad_nosync_counter = 0
 
             # -- Update lr every few seg (X segs = one step/iteration)
             total_seg = seg + epoch * dataset_train.num_seg
@@ -719,7 +753,7 @@ try:
                     })
 
                 if dist_rank == 0:
-                    print(f'[RANK {dist_rank}] Start evaluation...')
+                    logger.debug(f'[RANK {dist_rank}] Start evaluation...')
 
                 # -- Eval
                 validate_loss = 0.0
@@ -779,14 +813,15 @@ try:
                     training_state.loss_min  = loss_min
 
                     dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
-                    if dir_chkpt_prefix is not None: dir_chkpt = f"{dir_chkpt_prefix}.{dir_chkpt}"
+                    if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
                     path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
                     checkpointer.save(model, optimizer, scheduler, training_state, path_chkpt)
+                    logger.info(f"Saving checkpoint at {path_chkpt}.")
 
                 # All ranks wait until the end of evaluation by rank 0
                 # [WARNING] Expecting NCCL TIMEOUT ERROR if the evaluation takes too long
                 dist.barrier()
-                print(f'[RANK {dist_rank}] Done evaluation...')
+                logger.debug(f'[RANK {dist_rank}] Done evaluation...')
 
             # [PERFORMANCE]
             if dist_local_rank == 0:
@@ -800,10 +835,10 @@ try:
         from_resume = False
 
 except KeyboardInterrupt:
-    print(f"FSDP RANK {dist_rank}: Training was interrupted!")
+    logger.error(f"FSDP RANK {dist_rank}: Training was interrupted!")
 except Exception as e:
     tb = traceback.format_exc()
-    print(f"FSDP RANK {dist_rank}: Error occurred: {e}\nTraceback: {tb}")
+    logger.error(f"FSDP RANK {dist_rank}: Error occurred: {e}\nTraceback: {tb}")
 finally:
     # Ensure that the process group is always destroyed
     if dist.is_initialized():

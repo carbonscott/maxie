@@ -8,6 +8,10 @@ import numpy as np
 from maxie.datasets.psana_utils import PsanaImg
 from maxie.perf import Timer
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # Initialize buffer for each process
 psana_img_buffer = {}
 
@@ -33,7 +37,7 @@ def worker_process(server_socket, timeout):
             request_data = connection.recv(4096).decode('utf-8')
 
             if request_data == "DONE":
-                print("Received shutdown signal. Shutting down server.")
+                logger.debug("Received shutdown signal. Shutting down server.")
                 connection.close()
                 break
 
@@ -54,7 +58,7 @@ def worker_process(server_socket, timeout):
                     data = psana_img.get(event, None, mode)
 
                 if data is None:
-                    raise ValueError("Received None from psana!!!")
+                    raise ValueError(f"Received None from exp={exp}, run={run}, event={event}!!!")
 
                 # Keep numpy array in a shared memory
                 shm = shared_memory.SharedMemory(create=True, size=data.nbytes)
@@ -73,7 +77,7 @@ def worker_process(server_socket, timeout):
             except Exception as e:
                 error_message = {
                     "error": str(e),
-                    "traceback": traceback.format_exc()
+                    "traceback": None if isinstance(e, ValueError) else traceback.format_exc()
                 }
                 connection.sendall(json.dumps(error_message).encode('utf-8'))
 
@@ -83,16 +87,16 @@ def worker_process(server_socket, timeout):
                 ack = connection.recv(1024).decode('utf-8')
                 if ack == "ACK":
                     if shm is not None:
-                        print(f"Shared memory {shm.name} ready to unlink. Creation took {t.duration * 1e3} ms.")
+                        logger.debug(f"Shared memory {shm.name} ready to unlink. Creation took {t.duration * 1e3} ms.")
                 else:
-                    print("Did not receive proper acknowledgment from client.")
+                    logger.debug("Did not receive proper acknowledgment from client.")
             except:
-                print("Did not receive ACK for error message within timeout.")
+                logger.debug("Did not receive ACK for error message within timeout.")
 
             if shm is not None: unlink_shared_memory(shm.name)
 
         except Exception as e:
-            print(f"Unexpected error: {e}")
+            logger.debug(f"Unexpected error: {e}")
             continue
 
 def unlink_shared_memory(shm_name):
@@ -120,7 +124,7 @@ def start_server(address, num_workers, timeout):
     return processes, server_socket
 
 if __name__ == "__main__":
-    print(f"Launching IPC server script...")
+    logger.info(f"Launching IPC server script...")
     parser = argparse.ArgumentParser(description="Configure the server.")
     parser.add_argument("--hostname"   , type = str, default='localhost', help = "Server hostname (Default: 'localhost').")
     parser.add_argument("--port"       , type = int, default=5000       , help = "Server port (Default: 5000).")
@@ -136,14 +140,14 @@ if __name__ == "__main__":
     server_address = (hostname, port)
     processes, server_socket = start_server(server_address, num_workers, timeout)
 
-    print(f"Server is running at {hostname}:{port} with {num_workers} workers.")
+    logger.info(f"Server is running at {hostname}:{port} with {num_workers} workers.")
 
     try:
         # Wait to complete, join is wait
         for p in processes:
             p.join()
     except KeyboardInterrupt:
-        print("Shutdown signal received")
+        logger.info("Shutdown signal received")
 
         for p in processes:
             # Trigger connection to unblock accept() in workers
@@ -155,4 +159,4 @@ if __name__ == "__main__":
         for p in processes:
             p.join()
         server_socket.close()
-        print("Server shutdown gracefully.")
+        logger.info("Server shutdown gracefully.")
