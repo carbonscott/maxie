@@ -103,12 +103,13 @@ class IPCDistributedSegmentedDataset(Dataset):
             elif len(entry["events"]) != entry["num_events"]:
                 # Some experiment runs have fewer recorded events than documented
                 entry["num_events"] = len(entry["events"])
-        # Store a unique identifier for each experiment run in a queue
-        exp_run_queue = list(range(len(self.json_entry_list)))
+        # Store a unique identifier for each experiment run
+        exp_run_ids = list(range(len(self.json_entry_list)))
         
         # Begin round robin schedule
-        while len(exp_run_queue) > 0:
-            curr_exp_run_idx = exp_run_queue.pop(0)
+        while len(exp_run_ids) > 0:
+            # Randomly select the next experiment run to avoid cyclic patterns in data (could alternatively select determistically as LIFO queue)
+            curr_exp_run_idx = exp_run_ids.pop(np.random.choice(range(len(exp_run_ids))))
             curr_exp_run = self.json_entry_list[curr_exp_run_idx]
             if curr_exp_run["curr_event_idx"] < curr_exp_run["num_events"]:
                 # If current experiment run has unyielded events remaining, yield its next `events_per_round` events
@@ -120,9 +121,7 @@ class IPCDistributedSegmentedDataset(Dataset):
                     event = curr_exp_run["events"][event_idx]
                     yield (exp, run, PSANA_ACCESS_MODE, detector_name, event)
                 curr_exp_run["curr_event_idx"] = curr_round_end_idx
-                exp_run_queue.append(curr_exp_run_idx)
-            # Optionally, shuffle the order of experiment runs to avoid cyclic patterns in data
-            random.shuffle(exp_run_queue)
+                exp_run_ids.append(curr_exp_run_idx)
 
     def calculate_end_idx(self):
         # Calculate and return the end index for the current dataset segment.
