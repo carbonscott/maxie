@@ -214,7 +214,7 @@ else:
     dist_rank       = 0
     dist_local_rank = 0
     dist_world_size = 1
-    print(f"NO FSDP is used.  RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
+    print(f"NO distributed environment is required.  RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
 
 # --- Set up GPU device
 gpu_idx = dist_local_rank % torch.cuda.device_count()    # dist_local_rank is node-centric, whereas torch.cuda.device_count() is resource-centeric (on LSF)
@@ -350,6 +350,7 @@ logger.debug(f'[RANK {dist_rank}] Configuring model...')
 # -- Config the model
 model_config = AdaptedViTMAEForPreTrainingConfig(model_name = model_name)
 model = AdaptedViTMAEForPreTraining(model_config)
+if not uses_dist: model.to(device)
 
 # !! Make all params trainable, a workaround for pytorch 2.0.1
 torch_version = torch.__version__
@@ -420,7 +421,7 @@ if uses_dist:
     dist.barrier()
 
 # -- Optional grad sync off (to allow grad accumulation)
-grad_sync_context = lambda enables_sync: nullcontext() if enables_sync else model.no_sync()
+grad_sync_context = lambda enables_sync: nullcontext() if enables_sync or not uses_dist else model.no_sync()
 
 
 # -- [TODO] Apply activation checkpointing
@@ -653,11 +654,12 @@ try:
                 logger.info(f"Working on segment: {dataset_train.start_idx}:{dataset_train.end_idx}; Total size: {dataset_train.total_size}")
 
             # Split sampler across ranks
-            sampler = torch.utils.data.DistributedSampler(dataset_train, shuffle=True)
+            sampler = torch.utils.data.DistributedSampler(dataset_train, shuffle=True) if uses_dist else None
             dataloader = torch.utils.data.DataLoader(dataset_train, batch_size=batch_size, sampler=sampler, num_workers = num_workers, collate_fn=custom_collate)
 
             # Shuffle the training example
-            sampler.set_epoch(epoch)
+            if uses_dist:
+                sampler.set_epoch(epoch)
 
             # [WORKAROUND]
             # FIXME: Better data cleaning will eliminate None batch
@@ -677,7 +679,8 @@ try:
                         except StopIteration:
                             raise ValueError(f"[RANK {dist_rank}] No valid eval data found for obtaining the input shape!!!")
                             break
-                batch_input_shape = broadcast_dict(dict(batch_input_shape=batch_input_shape), src = 0, device = device).get('batch_input_shape')
+                if uses_dist:
+                    batch_input_shape = broadcast_dict(dict(batch_input_shape=batch_input_shape), src = 0, device = device).get('batch_input_shape')
 
             grad_nosync_counter = 0
             logger.debug(f"[RANK {dist_rank}] Start processing {len(dataloader)} batches at epoch {epoch}, seg {seg}.")
@@ -687,7 +690,7 @@ try:
                 # FIXME: Better data cleaning will eliminate None batch
                 if batch_data is None:
                     logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {batch_idx}.  Creating a dummy input!!!")
-                    batch_data = torch.zeros(batch_input_shape, device = device)
+                    batch_data = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype, device = device)
 
                 batch_input = batch_data
                 batch_input = batch_input.to(device, non_blocking = True)
@@ -765,11 +768,12 @@ try:
                 rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
                 dataset_eval_train.set_start_idx(rand_start_idx)
 
-                sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_train, shuffle=True)
+                sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_train, shuffle=True) if uses_dist else None
                 dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
 
                 # Shuffle the training example
-                sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
+                if uses_dist:
+                    sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
                 # Get loss
                 train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device, **data_dump_timestamp)
@@ -787,11 +791,12 @@ try:
                 rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
                 dataset_eval_val.set_start_idx(rand_start_idx)
 
-                sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_val, shuffle=True)
+                sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_val, shuffle=True) if uses_dist else None
                 dataloader_eval = torch.utils.data.DataLoader(dataset_eval_val, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
 
                 # Shuffle the validation example
-                sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
+                if uses_dist:
+                    sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
                 validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device, **data_dump_timestamp)
 
