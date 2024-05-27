@@ -483,7 +483,8 @@ class FullStateDictCheckpoint:
 
 
     def save(self, model, optimizer, lr_scheduler, training_state, path_checkpoint):
-        dist.barrier()    # Make sure all shards are at the same timepoint in training.
+        if dist.is_initialized():
+            dist.barrier()    # Make sure all shards are at the same timepoint in training.
 
         self.update_config(model, optimizer, lr_scheduler, training_state, path_checkpoint)
 
@@ -504,7 +505,8 @@ class FullStateDictCheckpoint:
             }
             torch.save(full_state_dict, path_checkpoint)
 
-        dist.barrier()
+        if dist.is_initialized():
+            dist.barrier()
 
 
     def update_config(self, model = None, optimizer = None, lr_scheduler = None, training_state = None, path_checkpoint = None):
@@ -534,7 +536,8 @@ class FullStateDictCheckpoint:
         Only the model needs to be loaded pre FSDP wrapper.
         """
         self._load_model_full_state_dict()
-        dist.barrier()    # Make sure all shards are at the same timepoint in training.
+        if dist.is_initialized():
+            dist.barrier()    # Make sure all shards are at the same timepoint in training.
 
 
     def post_fsdp_load(self, model, optimizer, lr_scheduler, training_state):
@@ -549,7 +552,9 @@ class FullStateDictCheckpoint:
         self._load_optim_full_state_dict()
         self._load_training_state_dict()
         self._load_lr_scheduler_state_dict()
-        dist.barrier()    # Make sure all shards are at the same timepoint in training.
+
+        if dist.is_initialized():
+            dist.barrier()    # Make sure all shards are at the same timepoint in training.
 
 
 # -- 2. SHARDED STATE DICT
@@ -796,11 +801,13 @@ class ShardedStateDictCheckpoint:
             self.config.path_checkpoint = path_checkpoint
             print(f"RANK {self.config.rank} - Checkpoint path loaded.")
 
-        dist.barrier()
+        if dist.is_initialized():
+            dist.barrier()
 
 
     def save(self, model, optimizer, lr_scheduler, training_state, path_checkpoint):
-        dist.barrier()
+        if dist.is_initialized():
+            dist.barrier()
 
         self.update_config(model, optimizer, lr_scheduler, training_state, path_checkpoint)
 
@@ -821,7 +828,8 @@ class ShardedStateDictCheckpoint:
             }
             torch.save(full_state_dict, path_scheduler_and_training_checkpoint)
 
-        dist.barrier()
+        if dist.is_initialized():
+            dist.barrier()
 
 
     def load(self):
@@ -832,7 +840,8 @@ class ShardedStateDictCheckpoint:
         self._load_training_state_dict()
         self._load_lr_scheduler_state_dict()
 
-        dist.barrier()
+        if dist.is_initialized():
+            dist.barrier()
 
 
 # ----------------------------------------------------------------------- #
