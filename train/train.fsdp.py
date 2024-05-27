@@ -22,6 +22,7 @@ from maxie.datasets.ipc_segmented_dataset_dist import IPCDistributedSegmentedDat
 from maxie.modeling.adapted_mae import AdaptedViTMAEForPreTrainingConfig, AdaptedViTMAEForPreTraining
 from maxie.utils.seed           import set_seed
 from maxie.utils.misc           import is_action_due
+from maxie.utils.checkpoint     import CheckpointConfig, Checkpoint
 from maxie.lr_scheduler         import CosineLRScheduler
 from maxie.perf                 import Timer
 from maxie.tensor_transforms    import Pad, DownscaleLocalMean, RandomPatch, RandomRotate, RandomShift, Patchify, Norm
@@ -382,7 +383,9 @@ if compiles_model:
 
 # -- CHECKPOINT (FULL STATE DICT)
 print(f'[RANK {dist_rank}] Confguring model checkpoint...')
-chkpt_config = FullStateDictCheckpointConfig(
+chkpt_config_func = FullStateDictCheckpointConfig if uses_dist else CheckpointConfig
+checkpoint_func   = FullStateDictCheckpoint       if uses_dist else Checkpoint
+chkpt_config = chkpt_config_func(
     model           = model,
     optimizer       = None,
     lr_scheduler    = None,
@@ -391,7 +394,7 @@ chkpt_config = FullStateDictCheckpointConfig(
     device          = device,
     path_checkpoint = path_chkpt_prev,
 )
-checkpointer = FullStateDictCheckpoint(config = chkpt_config)
+checkpointer = checkpoint_func(config = chkpt_config)
 from_resume = path_chkpt_prev is not None
 if from_resume:
     if isinstance(checkpointer, FullStateDictCheckpoint):
@@ -826,7 +829,8 @@ try:
 
                 # All ranks wait until the end of evaluation by rank 0
                 # [WARNING] Expecting NCCL TIMEOUT ERROR if the evaluation takes too long
-                dist.barrier()
+                if dist.is_initialized():
+                    dist.barrier()
                 logger.debug(f'[RANK {dist_rank}] Done evaluation...')
 
             # [PERFORMANCE]
