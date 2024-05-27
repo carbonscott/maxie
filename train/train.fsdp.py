@@ -105,11 +105,12 @@ with open(fl_yaml, 'r') as fh:
     config = yaml.safe_load(fh)
 
 # -- Checkpoint
-chkpt_config        = config.get("checkpoint")
-dir_root_chkpt      = chkpt_config.get("directory")
-fl_chkpt_prefix     = chkpt_config.get("prefix")
-path_chkpt_prev     = chkpt_config.get("path_chkpt_prev")
-chkpt_saving_period = chkpt_config.get("chkpt_saving_period")
+chkpt_config                = config.get("checkpoint")
+dir_root_chkpt              = chkpt_config.get("directory")
+fl_chkpt_prefix             = chkpt_config.get("prefix")
+path_chkpt_prev             = chkpt_config.get("path_chkpt_prev")
+chkpt_saving_period         = chkpt_config.get("chkpt_saving_period")
+preempt_chkpt_saving_period = chkpt_config.get("preempt_chkpt_saving_period")
 
 # -- Dataset
 dataset_config       = config.get("dataset")
@@ -492,7 +493,7 @@ if from_resume:
         dataset_train.start_idx = training_state.start_idx
         dataset_train.end_idx   = training_state.end_idx
 
-        logger.info(f"Loading from checkpoint.")
+        logger.info(f"Loading from checkpoint -- {path_chkpt_prev}.")
         logger.info(f"PREV - last_epoch {last_epoch}, last_seg {dataset_train.start_idx}-{dataset_train.end_idx}, loss_min = {loss_min}")
 
 
@@ -634,6 +635,7 @@ def is_last_batch(batch_idx, num_batches):
 #  TRAINING LOOP
 # ----------------------------------------------------------------------- #
 batch_input_shape = None
+preempt_metadata_path = os.environ.get('PREEMPT_METADATA_PATH', None)
 logger.debug(f'[RANK {dist_rank}] Ready for training loop...')
 try:
     for epoch in tqdm.tqdm(range(last_epoch+1, max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
@@ -832,6 +834,25 @@ try:
                 if dist.is_initialized():
                     dist.barrier()
                 logger.debug(f'[RANK {dist_rank}] Done evaluation...')
+
+            # -- Preemptive checkpointing
+            if preempt_metadata_path is not None and is_action_due(total_seg, preempt_chkpt_saving_period):
+                # Collect training state
+                training_state.epoch     = epoch
+                training_state.seg       = seg
+                training_state.start_idx = dataset_train.start_idx
+                training_state.end_idx   = dataset_train.end_idx
+                training_state.loss_min  = loss_min
+
+                dir_chkpt = f"{timestamp}.preempt"
+                if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
+                path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
+                checkpointer.save(model, optimizer, scheduler, training_state, path_chkpt)
+                logger.info(f"Saving preemptive checkpoint (epoch {epoch}, end_idx {dataset_train.end_idx}) at {path_chkpt}.")
+
+                with open(preempt_metadata_path, "w") as f:
+                    f.write(path_chkpt)
+                logger.info(f"Saving preemptive metadata (epoch {epoch}, end_idx {dataset_train.end_idx}) at {preempt_metadata_path}.")
 
             # [PERFORMANCE]
             if dist_local_rank == 0:
