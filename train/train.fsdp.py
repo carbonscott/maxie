@@ -169,12 +169,12 @@ fl_log_prefix  = logging_config.get("prefix")
 log_level      = logging_config.get("level")
 
 # -- Misc
-misc_config = config.get("misc")
-max_epochs           = misc_config.get("max_epochs")
-max_eval_iter        = misc_config.get("max_eval_iter")
-num_gpus             = misc_config.get("num_gpus")
-compiles_model       = misc_config.get("compiles_model")
-data_dump_on         = misc_config.get("data_dump_on", False)
+misc_config    = config.get("misc")
+max_epochs     = misc_config.get("max_epochs")
+max_eval_iter  = misc_config.get("max_eval_iter")
+compiles_model = misc_config.get("compiles_model")
+data_dump_on   = misc_config.get("data_dump_on", False)
+cpu_only       = misc_config.get("cpu_only", False)
 
 # ----------------------------------------------------------------------- #
 #  MISC FEATURES
@@ -218,7 +218,7 @@ else:
 
 # --- Set up GPU device
 gpu_idx = dist_local_rank % torch.cuda.device_count()    # dist_local_rank is node-centric, whereas torch.cuda.device_count() is resource-centeric (on LSF)
-device = f'cuda:{gpu_idx}' if torch.cuda.is_available() else 'cpu'
+device = f'cuda:{gpu_idx}' if not cpu_only and torch.cuda.is_available() else 'cpu'
 if device != 'cpu': torch.cuda.set_device(device)
 seed_offset = dist_rank if uses_unique_world_seed else 0
 
@@ -372,7 +372,8 @@ autocast_context = nullcontext() if device_type == 'cpu' else torch.amp.autocast
 
 # --- GradScaler
 # If enabled=False scaler is a no-op
-scaler = ShardedGradScaler(enabled=(dist_dtype == 'float16'))
+scaler_func = ShardedGradScaler if uses_dist else torch.cuda.amp.GradScaler
+scaler = scaler_func(enabled=(dist_dtype == 'float16'))
 
 # -- Compile the model
 if compiles_model:
@@ -592,7 +593,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         logger.error(f"[RANK {dist_rank}] EVAL ERROR: NaN encountered!!!")
         world_nan_counter += 1
         local_losses_mean  = 0.0    # Contribute to nothing in the reduced sum
-    dist.all_reduce(world_nan_counter, op=dist.ReduceOp.SUM)
+    if uses_dist: dist.all_reduce(world_nan_counter, op=dist.ReduceOp.SUM)
 
     # Scale the local loss for the final reduced sum
     local_losses_mean /= (dist_world_size - world_nan_counter + 1e-6)
@@ -600,7 +601,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     # Calculate reduced sum as the final mean loss
     world_losses_mean  = torch.zeros_like(local_losses_mean, dtype = torch.float32, device = device)
     world_losses_mean += local_losses_mean.to(torch.float32)
-    dist.all_reduce(world_losses_mean, op=dist.ReduceOp.SUM)
+    if uses_dist: dist.all_reduce(world_losses_mean, op=dist.ReduceOp.SUM)
 
     # !!!!!!!!!!!!!!!
     # !! Data dump !!
