@@ -535,7 +535,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
 
     losses      = torch.zeros(len(dataloader), device = device)
     num_samples = torch.zeros(len(dataloader), device = device)
-    proc_masks  = torch.zeros(len(dataloader), device = device)    # A mask to track the process
+    proc_masks  = torch.zeros(len(dataloader), device = device)  # A mask to track the process
     none_mask   = torch.zeros(len(dataloader), device = device)  # Mask for None batches
     for enum_idx, batch_data in tqdm.tqdm(enumerate(dataloader), total = max_iter, desc = f'[RANK {dist_rank}] Eval{desc}'):    # (B, C, H, W)
         # Sample at most max_iter batches
@@ -549,7 +549,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         if batch_data is None:
             logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {enum_idx}.  Creating a dummy input!!!")
             batch_data = torch.zeros(dummy_input_shape, device = device)
-            none_mask[enum_idx] = True
+            none_mask[enum_idx] = 1
 
         batch_input = batch_data
         batch_input = batch_input.to(device, non_blocking = True)
@@ -581,9 +581,9 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
             torch.save(data_dump, path_data_dump)
 
 
-        losses[enum_idx]      = loss
+        losses     [enum_idx] = loss
         num_samples[enum_idx] = len(batch_input)
-        proc_masks[enum_idx]   = 1
+        proc_masks [enum_idx] = 1
 
     # -- Handle nan
     # Obtain the nan mask
@@ -591,7 +591,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
 
     # Get the actual mask of values that are from the processing loop and non nan
     masks = torch.logical_and(proc_masks>0, non_nan_mask)
-    masks = torch.logical_and(masks, ~none_mask)
+    masks = torch.logical_and(masks, none_mask==0)  # Keep not-None elements
 
     # -- Mean loss over eval iterations
     local_valid_losses = losses[masks].to(torch.float32)
@@ -783,7 +783,7 @@ try:
                 # Get a random subset of the training set
                 train_loss = torch.tensor(float('nan'))
                 num_eval_retry = 0
-                while torch.isnan(train_loss) and num_eval_retry < max_eval_retry:
+                while torch.isnan(train_loss) and (num_eval_retry < max_eval_retry):
                     dataset_eval_train.reset()
                     high_seg_idx = dataset_eval_train.total_size - seg_size * dist_world_size
                     rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
@@ -810,7 +810,7 @@ try:
                 # Get a random subset of the validation set
                 validate_loss = torch.tensor(float('nan'))
                 num_eval_retry = 0
-                while torch.isnan(validate_loss) and num_eval_retry < max_eval_retry:
+                while torch.isnan(validate_loss) and (num_eval_retry < max_eval_retry):
                     dataset_eval_val.reset()
                     high_seg_idx = dataset_eval_val.total_size - seg_size * dist_world_size
                     rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
