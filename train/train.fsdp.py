@@ -638,12 +638,17 @@ batch_input_shape = None
 preempt_metadata_path = os.environ.get('PREEMPT_METADATA_PATH', None)
 logger.debug(f'[RANK {dist_rank}] Ready for training loop...')
 try:
-    for epoch in tqdm.tqdm(range(last_epoch+1, max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
+    # Only increment starting epoch if current epoch was fully completed
+    start_epoch = last_epoch if last_seg < dataset_train.num_seg else last_epoch + 1
+    for epoch in tqdm.tqdm(range(start_epoch, max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
         # -- Train one epoch
-        # Reset everything for a new epoch if not from a resume
-        if not from_resume:
+        # Reset everything for an epoch newer than last epoch in the checkpoint
+        if epoch > last_epoch:
             dataset_train.reset()
-        for seg in tqdm.tqdm(range(last_seg+1, dataset_train.num_seg), desc = f'[RANK {dist_rank}] Segment'):
+
+        # Only increment starting seg idx if still processing current epoch otherwise reset to 0
+        start_seg = last_seg + 1 if epoch == last_epoch else 0
+        for seg in tqdm.tqdm(range(start_seg, dataset_train.num_seg), desc = f'[RANK {dist_rank}] Segment'):
             # -- Train one segment
             # [PERFORMANCE]
             if dist_local_rank == 0:
@@ -862,14 +867,11 @@ try:
             if dist_local_rank == 0:
                 memmax.stop()
 
-        # Reset the from_resume flag
-        from_resume = False
-
 except KeyboardInterrupt:
-    logger.error(f"FSDP RANK {dist_rank}: Training was interrupted!")
+    logger.error(f"[RANK {dist_rank}] Training was interrupted!")
 except Exception as e:
     tb = traceback.format_exc()
-    logger.error(f"FSDP RANK {dist_rank}: Error occurred: {e}\nTraceback: {tb}")
+    logger.error(f"[RANK {dist_rank}] Error occurred: {e}\nTraceback: {tb}")
 finally:
     # Ensure that the process group is always destroyed
     if dist.is_initialized():
