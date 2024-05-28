@@ -174,6 +174,7 @@ log_level      = logging_config.get("level")
 misc_config    = config.get("misc")
 max_epochs     = misc_config.get("max_epochs")
 max_eval_iter  = misc_config.get("max_eval_iter")
+max_eval_retry = misc_config.get("max_eval_retry")
 compiles_model = misc_config.get("compiles_model")
 data_dump_on   = misc_config.get("data_dump_on", False)
 cpu_only       = misc_config.get("cpu_only", False)
@@ -501,13 +502,14 @@ if from_resume:
 #  HELPER
 # ----------------------------------------------------------------------- #
 @torch.no_grad()
-def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '', device = 'cpu', **kwargs):
+def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '', device = 'cpu', dummy_input_shape=None, **kwargs):
     ''' Estimate loss.
         The dataloader should be wrapped with Dataloader class or
         DistributedSampler class, best with shuffle being true.  The shuffle
         takes place before batching.
     '''
     # -- Setup
+    uses_dist       = kwargs.get('uses_dist')
     dist_rank       = kwargs.get('dist_rank')
     dist_world_size = kwargs.get('dist_world_size')
 
@@ -534,6 +536,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     losses      = torch.zeros(len(dataloader), device = device)
     num_samples = torch.zeros(len(dataloader), device = device)
     proc_masks  = torch.zeros(len(dataloader), device = device)    # A mask to track the process
+    none_mask   = torch.zeros(len(dataloader), device = device)  # Mask for None batches
     for enum_idx, batch_data in tqdm.tqdm(enumerate(dataloader), total = max_iter, desc = f'[RANK {dist_rank}] Eval{desc}'):    # (B, C, H, W)
         # Sample at most max_iter batches
         if enum_idx >= max_iter: break
@@ -541,8 +544,12 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         if dist_rank == 0:
             logger.debug(f"[RANK {dist_rank}] EVAL - Pre fetching mini_batch {enum_idx}")
 
-        # Skip a batch if it's a None
-        if batch_data is None: continue
+        # Create dummy data for a None batch
+        # FIXME: Better data cleaning will eliminate None batch
+        if batch_data is None:
+            logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {enum_idx}.  Creating a dummy input!!!")
+            batch_data = torch.zeros(dummy_input_shape, device = device)
+            none_mask[enum_idx] = True
 
         batch_input = batch_data
         batch_input = batch_input.to(device, non_blocking = True)
@@ -584,10 +591,11 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
 
     # Get the actual mask of values that are from the processing loop and non nan
     masks = torch.logical_and(proc_masks>0, non_nan_mask)
+    masks = torch.logical_and(masks, ~none_mask)
 
     # -- Mean loss over eval iterations
     local_valid_losses = losses[masks].to(torch.float32)
-    local_losses_mean  = local_valid_losses.mean()
+    local_losses_mean  = local_valid_losses.mean()  # torch.isnan(torch.tensor([]).mean()) -> True
 
     # -- Mean loss over ranks
     # Survey the occurence of nan across ranks
@@ -756,6 +764,7 @@ try:
                 # !! Data dump !!
                 # !!!!!!!!!!!!!!!
                 data_dump_timestamp = {
+                    "uses_dist"       : uses_dist,
                     "dist_rank"       : dist_rank,
                     "dist_world_size" : dist_world_size,
                 }
@@ -770,24 +779,26 @@ try:
                     logger.debug(f'[RANK {dist_rank}] Start evaluation...')
 
                 # -- Eval
-                validate_loss = 0.0
-
                 # --- Train
                 # Get a random subset of the training set
-                dataset_eval_train.reset()
-                high_seg_idx = dataset_eval_train.total_size - seg_size * dist_world_size
-                rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
-                dataset_eval_train.set_start_idx(rand_start_idx)
+                train_loss = torch.tensor(float('nan'))
+                num_eval_retry = 0
+                while torch.isnan(train_loss) and num_eval_retry < max_eval_retry:
+                    dataset_eval_train.reset()
+                    high_seg_idx = dataset_eval_train.total_size - seg_size * dist_world_size
+                    rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
+                    dataset_eval_train.set_start_idx(rand_start_idx)
 
-                sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_train, shuffle=True) if uses_dist else None
-                dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
+                    sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_train, shuffle=True) if uses_dist else None
+                    dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
 
-                # Shuffle the training example
-                if uses_dist:
-                    sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
+                    # Shuffle the training example
+                    if uses_dist:
+                        sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
-                # Get loss
-                train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device, **data_dump_timestamp)
+                    # Get loss
+                    train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device, dummy_input_shape = batch_input_shape, **data_dump_timestamp)
+                    num_eval_retry += 1
 
                 # Log the train loss
                 if dist_rank == 0:
@@ -797,19 +808,23 @@ try:
 
                 # --- Validation
                 # Get a random subset of the validation set
-                dataset_eval_val.reset()
-                high_seg_idx = dataset_eval_val.total_size - seg_size * dist_world_size
-                rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
-                dataset_eval_val.set_start_idx(rand_start_idx)
+                validate_loss = torch.tensor(float('nan'))
+                num_eval_retry = 0
+                while torch.isnan(validate_loss) and num_eval_retry < max_eval_retry:
+                    dataset_eval_val.reset()
+                    high_seg_idx = dataset_eval_val.total_size - seg_size * dist_world_size
+                    rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
+                    dataset_eval_val.set_start_idx(rand_start_idx)
 
-                sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_val, shuffle=True) if uses_dist else None
-                dataloader_eval = torch.utils.data.DataLoader(dataset_eval_val, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
+                    sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_val, shuffle=True) if uses_dist else None
+                    dataloader_eval = torch.utils.data.DataLoader(dataset_eval_val, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
 
-                # Shuffle the validation example
-                if uses_dist:
-                    sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
+                    # Shuffle the validation example
+                    if uses_dist:
+                        sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
-                validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device, **data_dump_timestamp)
+                    validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device, dummy_input_shape = batch_input_shape, **data_dump_timestamp)
+                    num_eval_retry += 1
 
                 # Log the validation loss
                 if dist_rank == 0:

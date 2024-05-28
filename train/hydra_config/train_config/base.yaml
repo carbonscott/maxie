@@ -54,6 +54,7 @@ lr_scheduler:
 misc:
   max_epochs          : 5
   max_eval_iter       : 50
+  max_eval_retry      : 2
   num_gpus            : 4
   uses_mixed_precision: true
   compiles_model      : false
