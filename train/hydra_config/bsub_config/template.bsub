@@ -6,6 +6,8 @@
 #BSUB -P LRN044
 #BSUB -J {{ job }}
 #BSUB -nnodes {{ num_nodes }}
+#BSUB -wa USR1
+#BSUB -wt {{ min_before_term }}
 
 # Set up the Huggingface's cache directory
 export TRANSFORMERS_CACHE={{ transformers_cache }}
@@ -27,6 +29,15 @@ if [ -f $PREEMPT_METADATA_PATH ]; then
     echo "Resuming from preemptive checkpoint..."
     python -c "import yaml, os; data = yaml.safe_load(open('{{ yaml_config }}')); data['checkpoint']['path_chkpt_prev'] = open(os.getenv('PREEMPT_METADATA_PATH')).read().strip(); yaml.safe_dump(data, open('{{ yaml_config }}', 'w'))"
 fi
+
+{%- if force_resubmit %}
+
+# Obtain the absolute path of this script for a job resubmission without using a queue that supports re-queue
+export RESUB_SCRIPT="${PWD}/experiments/bsub/{{ job }}.bsub"
+export MIN_BEFORE_TERM={{ min_before_term }}
+export SUB_HOSTNAME=$(hostname)
+
+{%- endif %}
 
 # Fetch all nodes and output a whole string of concatenated host nodes
 # $LSB_MCPU_HOSTS gives something like "batch02 1 a09n03 42 a10n04 42".

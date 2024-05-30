@@ -182,13 +182,29 @@ cpu_only       = misc_config.get("cpu_only", False)
 # ----------------------------------------------------------------------- #
 #  MISC FEATURES
 # ----------------------------------------------------------------------- #
-def signal_handler(signal, frame):
+# -- Ctrl-C
+def signal_handler(signum, frame):
     # Emit Ctrl+C like signal which is then caught by our try/except block
     raise KeyboardInterrupt
 
 # Register the signal handler
 signal.signal(signal.SIGINT,  signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
+
+# -- Forcefully resubmit the job script
+def resubmit_handler(signum, frame):
+    resub_script    = os.environ.get('RESUB_SCRIPT', None)
+    sec_before_term = int(os.environ.get('MIN_BEFORE_TERM', 0)) * 60  # seconds
+    sub_hostname    = os.environ.get('SUB_HOSTNAME', None)
+    if dist.is_initialized() and dist.get_rank() == 0:
+        if resub_script is not None and sub_hostname is not None:
+            print(f"sleep {sec_before_term} && bsub {resub_script} &")
+            os.system(f"ssh {sub_hostname} 'sleep {sec_before_term} && bsub {resub_script}'")
+    raise Exception(f"Job is going to be terminated by signal {signum}!!!")
+
+# Register the signal handler
+signal.signal(signal.SIGUSR1, resubmit_handler)
+signal.signal(signal.SIGUSR2, resubmit_handler)
 
 
 # ----------------------------------------------------------------------- #

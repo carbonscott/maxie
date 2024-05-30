@@ -10,3 +10,5 @@ yaml_config        : 'base.yaml'
 ipc_workers        : 2
 OMP_NUM_THREADS    : 1
 transformers_cache : $HOME/.cache/huggingface
+force_resubmit     : false
+min_before_term    : 5
