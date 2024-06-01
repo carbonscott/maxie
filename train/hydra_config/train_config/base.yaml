@@ -61,6 +61,7 @@ misc:
   data_dump_on        : false
 model:
   name: 'facebook/vit-mae-base'
+  mask_ratio: 0.75
 optim:
   grad_clip   : 1.0
   lr          : !!float 2e-4

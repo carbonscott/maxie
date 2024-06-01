@@ -28,20 +28,23 @@ def update_num_channels(model, new_channels=1):
 # ----------------------------------------------------------------------- #
 @dataclass
 class AdaptedViTMAEForPreTrainingConfig:
-    model_name: str = "facebook/vit-mae-base"
+    model_name: str   = "facebook/vit-mae-base"
+    mask_ratio: float = 0.75
 
 class AdaptedViTMAEForPreTraining(nn.Module):
-    IMG_SIZE           = 224
     NUM_RGB_CHANNEL    = 3
     DECODE_IN_FEATURES = 512
 
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.model  = AdaptedViTMAEForPreTraining.adapt_pretrained_model(self.config.model_name)
+        self.model  = AdaptedViTMAEForPreTraining.adapt_pretrained_model(
+            self.config.model_name,
+            self.config.mask_ratio,
+        )
 
     @staticmethod
-    def adapt_pretrained_model(model_name):
+    def adapt_pretrained_model(model_name, mask_ratio):
         # -- Which pretrained model is in use
         vit_mae_model_config_dict = {
             "facebook/vit-mae-base"  : { "emb_size" : 768,  "win_size" : 16 },
@@ -51,7 +54,6 @@ class AdaptedViTMAEForPreTraining(nn.Module):
         vit_mae_model_config = vit_mae_model_config_dict[model_name]
         emb_size = vit_mae_model_config['emb_size']
         win_size = vit_mae_model_config['win_size']
-        grid_size = int(AdaptedViTMAEForPreTraining.IMG_SIZE / win_size)
 
         # -- Initialize the pretrained model
         model = ViTMAEForPreTraining.from_pretrained(model_name)
@@ -80,6 +82,9 @@ class AdaptedViTMAEForPreTraining(nn.Module):
             out_features = win_size*win_size,
             bias         = True)
         model.decoder.decoder_pred.weight.data = avg_weight_decoder_pred
+
+        # --- Adapt the mask ratio
+        model.config.mask_ratio = mask_ratio
 
         return model
 

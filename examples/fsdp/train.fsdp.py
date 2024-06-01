@@ -138,6 +138,7 @@ detector_norm_params = transforms_config.get("norm")
 # -- Model
 model_params = config.get("model")
 model_name   = model_params.get("name")
+mask_ratio   = model_params.get("mask_ratio")
 
 # -- Loss
 loss_config      = config.get("loss")
@@ -351,7 +352,10 @@ def custom_collate(batch):
 # ----------------------------------------------------------------------- #
 logger.debug(f'[RANK {dist_rank}] Configuring model...')
 # -- Config the model
-model_config = AdaptedViTMAEForPreTrainingConfig(model_name = model_name)
+model_config = AdaptedViTMAEForPreTrainingConfig(
+    model_name = model_name,
+    mask_ratio = mask_ratio,
+)
 model = AdaptedViTMAEForPreTraining(model_config)
 if not uses_dist: model.to(device)
 
