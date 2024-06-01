@@ -136,6 +136,9 @@ class IPCDistributedSegmentedDataset(Dataset):
                         break
 
     def calculate_end_idx(self):
+        """
+        end_idx is not inclusive (up to, but not including end_idx)
+        """
         # Calculate and return the end index for the current dataset segment.
         return min(self.start_idx + self.seg_size * self.world_size, self.total_size)
 
@@ -150,12 +153,16 @@ class IPCDistributedSegmentedDataset(Dataset):
         return list(islice(self.json_entry_gen, 0, self.end_idx - self.start_idx))
 
     def set_start_idx(self, start_idx):
+        # Reset if the start_idx points to the end of the dataset
+        if start_idx == self.total_size:
+            self.reset()
+
         if self.debug:
             logger.debug(f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] Setting start idx to {start_idx}.")
         self.start_idx = start_idx
         self.end_idx   = self.calculate_end_idx()
 
-        # Optinally reset and/or advance the generator
+        # Optionally reset and/or advance the generator
         if self.json_entry_gen is None:
             # Initialize the generator for a resumption or rewind
             json_entry_gen = self._init_entry_generator()
