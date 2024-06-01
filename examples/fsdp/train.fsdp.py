@@ -650,7 +650,7 @@ logger.debug(f'[RANK {dist_rank}] Ready for training loop...')
 try:
     # Only increment starting epoch if current epoch was fully completed
     for epoch in tqdm.tqdm(range(max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
-        # -- Skip prev epochs
+        # -- Skip epochs up to, but not including the last_epoch
         if epoch < last_epoch: continue
 
         # -- Train one epoch
@@ -666,8 +666,8 @@ try:
 
         # Only increment starting seg idx if still processing current epoch otherwise reset to 0
         for seg in tqdm.tqdm(range(dataset_train.num_seg), desc = f'[RANK {dist_rank}] Segment'):
-            # -- Skip prev segs
-            if seg < last_seg: continue
+            # -- Skip previous segments up to and including the last_seg
+            if seg <= last_seg: continue
 
             # -- Train one segment
             # [PERFORMANCE]
