@@ -483,23 +483,21 @@ training_state = TrainingStateDictConfig(
 )
 
 # -- Optional resumption
-last_epoch = -1
-last_seg   = -1
+last_epoch = 0
+last_seg   = 0
 if from_resume:
     if isinstance(checkpointer, FullStateDictCheckpoint):
         # Optimizer, scheduler are loaded
         checkpointer.post_fsdp_load(model, optimizer, scheduler, training_state)
 
         # Training state
-        training_state          = checkpointer.config.training_state
-        last_epoch              = training_state.epoch
-        last_seg                = training_state.seg
-        loss_min                = training_state.loss_min
-        dataset_train.start_idx = training_state.start_idx
-        dataset_train.end_idx   = training_state.end_idx
+        training_state = checkpointer.config.training_state
+        last_epoch     = training_state.epoch
+        last_seg       = training_state.seg
+        loss_min       = training_state.loss_min
 
         logger.info(f"Loading from checkpoint -- {path_chkpt_prev}.")
-        logger.info(f"PREV - last_epoch {last_epoch}, last_seg {dataset_train.start_idx}-{dataset_train.end_idx}, loss_min = {loss_min}")
+        logger.info(f"PREV - last_epoch {last_epoch}, last_seg {training_state.start_idx}-{training_state.end_idx}, loss_min = {loss_min}")
 
 
 # ----------------------------------------------------------------------- #
@@ -651,16 +649,26 @@ preempt_metadata_path = os.environ.get('PREEMPT_METADATA_PATH', None)
 logger.debug(f'[RANK {dist_rank}] Ready for training loop...')
 try:
     # Only increment starting epoch if current epoch was fully completed
-    start_epoch = last_epoch if last_seg < dataset_train.num_seg else last_epoch + 1
-    for epoch in tqdm.tqdm(range(start_epoch, max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
+    for epoch in tqdm.tqdm(range(max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
+        # -- Skip prev epochs
+        if epoch < last_epoch: continue
+
         # -- Train one epoch
-        # Reset everything for an epoch newer than last epoch in the checkpoint
-        if epoch > last_epoch:
+        # Reset dataset in a new epoch???
+        if not from_resume:
             dataset_train.reset()
 
+        # Otherwise, update the dataset index according to the training state
+        else:
+            # Update the dataset status
+            dataset_train.start_idx = training_state.start_idx
+            dataset_train.end_idx   = training_state.end_idx
+
         # Only increment starting seg idx if still processing current epoch otherwise reset to 0
-        start_seg = last_seg + 1 if epoch == last_epoch else 0
-        for seg in tqdm.tqdm(range(start_seg, dataset_train.num_seg), desc = f'[RANK {dist_rank}] Segment'):
+        for seg in tqdm.tqdm(range(dataset_train.num_seg), desc = f'[RANK {dist_rank}] Segment'):
+            # -- Skip prev segs
+            if seg < last_seg: continue
+
             # -- Train one segment
             # [PERFORMANCE]
             if dist_local_rank == 0:
@@ -886,6 +894,9 @@ try:
             # [PERFORMANCE]
             if dist_local_rank == 0:
                 memmax.stop()
+
+        # Reset the from_resume flag
+        from_resume = False
 
 except KeyboardInterrupt:
     logger.error(f"[RANK {dist_rank}] Training was interrupted!")
