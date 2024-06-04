@@ -189,17 +189,19 @@ class Patchify:
         >>> patches = patchifier(imgs)
         >>> print(patches.shape)
     """
-    def __init__(self, patch_size, stride):
-        self.patch_size = patch_size
-        self.stride     = stride
+    def __init__(self, patch_size, stride, flat_batch_and_patch = True):
+        self.patch_size           = patch_size
+        self.stride               = stride
+        self.flat_batch_and_patch = flat_batch_and_patch
 
     def __call__(self, batch_img, **kwargs):
         """
         Arguments:
             img: (B, C, H, W)
         """
-        patch_size = self.patch_size
-        stride     = self.stride
+        patch_size           = self.patch_size
+        stride               = self.stride
+        flat_batch_and_patch = self.flat_batch_and_patch
 
         B, C, H, W = batch_img.shape
 
@@ -223,7 +225,13 @@ class Patchify:
         # (B, C, patch_size, patch_size, num_patches) -> (B, num_patches, C, patch_size, patch_size)
         batch_patches = batch_patches.permute(0, 4, 1, 2, 3).contiguous()
 
+
+        if flat_batch_and_patch:
+            # (B, num_patches, C, patch_size, patch_size) -> (B * num_patches, C, patch_size, patch_size)
+            batch_patches = batch_patches.view(-1, C, patch_size, patch_size)
+
         return batch_patches
+
 
 class Norm:
     def __init__(self, detector_norm_params):
@@ -233,3 +241,18 @@ class Norm:
         mean, std = self.detector_norm_params[detector_name]["mean"], self.detector_norm_params[detector_name]["std"]
         C = img.shape[-3]
         return normalize(img, [mean]*C, [std]*C)
+
+
+class BatchPermSampler:
+    def __init__(self, sampling_fraction = None):
+        if sampling_fraction is not None and (sampling_fraction < 0.0 or sampling_fraction > 1.0):
+            raise ValueError("sampling_fraction must be None or a number between 0 and 1.")
+        self.sampling_fraction = sampling_fraction
+
+    def __call__(self, image_tensor, **kwargs):
+        if self.sampling_fraction is not None:
+            B = image_tensor.size(0)
+            sample_size    = int(B * self.sampling_fraction)
+            sample_indices = torch.randperm(B)[:sample_size]
+            image_tensor   = image_tensor[sample_indices]
+        return image_tensor
