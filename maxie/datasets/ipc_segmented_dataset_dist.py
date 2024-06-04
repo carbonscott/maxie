@@ -195,8 +195,6 @@ class IPCDistributedSegmentedDataset(Dataset):
             for enum_idx, trans in enumerate(self.transforms):
                 with Timer(tag = None, is_on = self.is_perf):
                     image_tensor = trans(image_tensor, detector_name=detector_name)
-            B, N, C, H, W = image_tensor.shape    # (B=1, num_patches, C, patch_size, patch_size)
-            image_tensor = image_tensor.view(B*N, C, H, W)
 
         return image_tensor
 
