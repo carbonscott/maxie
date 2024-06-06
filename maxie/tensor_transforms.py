@@ -243,7 +243,7 @@ class Norm:
         return normalize(img, [mean]*C, [std]*C)
 
 
-class BatchPermSampler:
+class BatchSampler:
     def __init__(self, sampling_fraction = None, dim = 0):
         if sampling_fraction is not None and (sampling_fraction <= 0.0 or sampling_fraction > 1.0):
             raise ValueError("sampling_fraction must be None or a number between 0 and 1.")
