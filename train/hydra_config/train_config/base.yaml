@@ -35,6 +35,7 @@ dataset:
     var_size_patch: 0.2
     patch_size: 224
     stride: 224
+    sampling_fraction: null
 dist:
   backend               : nccl
   uses_unique_world_seed: true
