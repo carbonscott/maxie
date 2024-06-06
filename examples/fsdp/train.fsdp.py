@@ -25,7 +25,7 @@ from maxie.utils.misc           import is_action_due
 from maxie.utils.checkpoint     import CheckpointConfig, Checkpoint
 from maxie.lr_scheduler         import CosineLRScheduler
 from maxie.perf                 import Timer
-from maxie.tensor_transforms    import Pad, DownscaleLocalMean, RandomPatch, RandomRotate, RandomShift, Patchify, Norm, BatchPermSampler
+from maxie.tensor_transforms    import Pad, DownscaleLocalMean, RandomPatch, RandomRotate, RandomShift, Patchify, Norm, BatchSampler
 from maxie.utils_fsdp           import (
     MemoryMaximizer,
     verify_bfloat_support,
@@ -308,7 +308,7 @@ transforms = (
     ## RandomRotate(angle_max),
     RandomShift(frac_y_shift_max=frac_shift_max, frac_x_shift_max=frac_shift_max),
     Patchify(patch_size, stride),
-    BatchPermSampler(sampling_fraction),
+    BatchSampler(sampling_fraction),
 )
 
 # -- Set up training set
