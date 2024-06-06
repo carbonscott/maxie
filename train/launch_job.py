@@ -69,5 +69,21 @@ def main(cfg: DictConfig):
         print(bsub_command)
         os.system(bsub_command)
 
+    # ----------------------------------------------------------------------- #
+    #  PREEMPTIVE CHECKPOINT METADATA
+    # ----------------------------------------------------------------------- #
+    # Remove preempt checkpoint metadata if user chooses to specify their own
+    dir_preempt  = 'preempt'
+    file_preempt = f'{cfg.job}.dat'
+    path_preempt = os.path.join(dir_preempt, file_preempt)
+    if os.path.exists(path_preempt):
+        if cfg.train_config.checkpoint.path_chkpt_prev is not None:
+            try:
+                os.remove(path_preempt)
+                print(f"User specified path_chkpt_prev is not None.  File '{path_preempt}' has been removed successfully.")
+            except Exception as e:
+                print(f"An error occurred while trying to remove the file: {e}")
+
+
 if __name__ == "__main__":
     main()
