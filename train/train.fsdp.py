@@ -18,15 +18,32 @@ from contextlib import nullcontext
 from datetime   import timedelta
 
 # -- maxie specific imports
-from maxie.datasets.ipc_segmented_dataset_dist import IPCDistributedSegmentedDatasetConfig, IPCDistributedSegmentedDataset, IPCDatasetConfig, IPCDataset
-from maxie.modeling.adapted_mae import AdaptedViTMAEForPreTrainingConfig, AdaptedViTMAEForPreTraining
-from maxie.utils.seed           import set_seed
-from maxie.utils.misc           import is_action_due
-from maxie.utils.checkpoint     import CheckpointConfig, Checkpoint
-from maxie.lr_scheduler         import CosineLRScheduler
-from maxie.perf                 import Timer
-from maxie.tensor_transforms    import Pad, DownscaleLocalMean, RandomPatch, RandomRotate, RandomShift, Patchify, Norm, BatchSampler
-from maxie.utils_fsdp           import (
+from maxie.datasets.ipc_segmented_dataset_dist import (
+    IPCDistributedSegmentedDatasetConfig,
+    IPCDistributedSegmentedDataset,
+    IPCDatasetConfig,
+    IPCDataset,
+)
+from maxie.modeling.adapted_mae import (
+    AdaptedViTMAEForPreTrainingConfig,
+    AdaptedViTMAEForPreTraining,
+)
+from maxie.utils.seed        import set_seed
+from maxie.utils.misc        import is_action_due
+from maxie.utils.checkpoint  import CheckpointConfig, Checkpoint
+from maxie.lr_scheduler      import CosineLRScheduler
+from maxie.perf              import Timer
+from maxie.tensor_transforms import (
+    Pad,
+    DownscaleLocalMean,
+    RandomPatch,
+    RandomRotate,
+    RandomShift,
+    Patchify,
+    Norm,
+    BatchSampler,
+)
+from maxie.utils_fsdp import (
     MemoryMaximizer,
     verify_bfloat_support,
     TrainingStateDictConfig,
@@ -84,7 +101,7 @@ torch.autograd.set_detect_anomaly(False)
 
 # -- Reporting specific imports
 import colorama
-colorama.init(autoreset=True)
+colorama.init(autoreset = True)
 
 # -- Get the logger
 logger = logging.getLogger(__name__)
@@ -92,7 +109,7 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------- #
 #  COMMAND LINE INTERFACE
 # ----------------------------------------------------------------------- #
-parser = argparse.ArgumentParser(description="Load training configuration from a YAML file to a dictionary.")
+parser = argparse.ArgumentParser(description = "Load training configuration from a YAML file to a dictionary.")
 parser.add_argument("yaml_file", help="Path to the YAML file")
 args = parser.parse_args()
 
@@ -116,6 +133,7 @@ preempt_chkpt_saving_period = chkpt_config.get("preempt_chkpt_saving_period")
 dataset_config       = config.get("dataset")
 path_train_json      = dataset_config.get("path_train")
 path_eval_json       = dataset_config.get("path_eval")
+drop_last_in_sampler = dataset_config.get("drop_last_in_sampler")
 batch_size           = dataset_config.get("batch_size")
 num_workers          = dataset_config.get("num_workers")
 seg_size             = dataset_config.get("seg_size")
@@ -212,7 +230,7 @@ if uses_dist:
     dist.init_process_group(backend     = dist_backend,
                             rank        = dist_rank,
                             world_size  = dist_world_size,
-                            timeout     = timedelta(seconds=1800),
+                            timeout     = timedelta(seconds = 1800),
                             init_method = "env://",)
     print(f"RANK:{dist_rank},LOCAL_RANK:{dist_local_rank},WORLD_SIZE:{dist_world_size}")
 else:
@@ -281,7 +299,14 @@ backward_prefetch = BackwardPrefetch.BACKWARD_PRE
 #  LOGGING
 # ----------------------------------------------------------------------- #
 # Fetch the current timestamp...
-timestamp = init_logger(uses_dist, dist_rank, device, fl_prefix = fl_log_prefix, drc_log = drc_log, level = log_level)
+timestamp = init_logger(
+    uses_dist,
+    dist_rank,
+    device,
+    fl_prefix = fl_log_prefix,
+    drc_log = drc_log,
+    level = log_level,
+)
 
 if dist_rank == 0:
     # Convert dictionary to yaml formatted string...
@@ -306,7 +331,7 @@ transforms = (
     ## DownscaleLocalMean(factors = downscale_factors),
     ## RandomPatch(num_patch = num_patch, H_patch = size_patch, W_patch = size_patch, var_H_patch = var_size_patch, var_W_patch = var_size_patch, returns_mask = False),
     ## RandomRotate(angle_max),
-    RandomShift(frac_y_shift_max=frac_shift_max, frac_x_shift_max=frac_shift_max),
+    RandomShift(frac_y_shift_max = frac_shift_max, frac_x_shift_max = frac_shift_max),
     Patchify(patch_size, stride),
     BatchSampler(sampling_fraction),
 )
@@ -344,10 +369,10 @@ ipc_dataset_eval_config = IPCDistributedSegmentedDatasetConfig(
 dataset_eval_val = IPCDistributedSegmentedDataset(ipc_dataset_eval_config)
 
 # -- Custom collate to merge patch and batch dimension using concatenation
-## custom_collate = lambda batch: torch.cat(batch, dim=0)  # batch of [N, C, H, W] -> [B * N, C, H, W]
+## custom_collate = lambda batch: torch.cat(batch, dim = 0)  # batch of [N, C, H, W] -> [B * N, C, H, W]
 def custom_collate(batch):
     batch_filtered = [x for x in batch if x is not None]
-    return torch.cat(batch_filtered, dim=0) if len(batch_filtered) else None
+    return torch.cat(batch_filtered, dim = 0) if len(batch_filtered) else None
 
 # ----------------------------------------------------------------------- #
 #  MODEL
@@ -377,10 +402,10 @@ mixed_precision_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, '
 
 # --- Autocast
 device_type = 'cuda' if 'cuda' in device else 'cpu'
-autocast_context = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=mixed_precision_dtype)
+autocast_context = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type = device_type, dtype = mixed_precision_dtype)
 
 # --- GradScaler
-# If enabled=False scaler is a no-op
+# If enabled = False scaler is a no-op
 scaler_func = ShardedGradScaler if uses_dist else torch.cuda.amp.GradScaler
 scaler = scaler_func(enabled=(dist_dtype == 'float16'))
 
@@ -506,7 +531,7 @@ if from_resume:
 #  HELPER
 # ----------------------------------------------------------------------- #
 @torch.no_grad()
-def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '', device = 'cpu', dummy_input_shape=None, **kwargs):
+def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '', device = 'cpu', dummy_input_shape = None, **kwargs):
     ''' Estimate loss.
         The dataloader should be wrapped with Dataloader class or
         DistributedSampler class, best with shuffle being true.  The shuffle
@@ -526,7 +551,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     # !!!!!!!!!!!!!!!
     if dist_rank == 0 and data_dump_on:
         dir_data_dump = "data_dump"
-        os.makedirs(dir_data_dump, exist_ok=True)
+        os.makedirs(dir_data_dump, exist_ok = True)
 
         fl_log_prefix = kwargs.get('fl_log_prefix')
         epoch         = kwargs.get('epoch')
@@ -584,7 +609,6 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
             path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_seg{seg}_minib{mini_batch}.loop.pt')
             torch.save(data_dump, path_data_dump)
 
-
         losses     [enum_idx] = loss
         num_samples[enum_idx] = len(batch_input)
         proc_masks [enum_idx] = 1
@@ -609,7 +633,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         logger.error(f"[RANK {dist_rank}] EVAL ERROR: NaN encountered!!!")
         world_nan_counter += 1
         local_losses_mean  = 0.0    # Contribute to nothing in the reduced sum
-    if uses_dist: dist.all_reduce(world_nan_counter, op=dist.ReduceOp.SUM)
+    if uses_dist: dist.all_reduce(world_nan_counter, op = dist.ReduceOp.SUM)
 
     # Scale the local loss for the final reduced sum
     local_losses_mean /= (dist_world_size - world_nan_counter + 1e-6)
@@ -617,7 +641,7 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
     # Calculate reduced sum as the final mean loss
     world_losses_mean  = torch.zeros_like(local_losses_mean, dtype = torch.float32, device = device)
     world_losses_mean += local_losses_mean.to(torch.float32)
-    if uses_dist: dist.all_reduce(world_losses_mean, op=dist.ReduceOp.SUM)
+    if uses_dist: dist.all_reduce(world_losses_mean, op = dist.ReduceOp.SUM)
 
     # !!!!!!!!!!!!!!!
     # !! Data dump !!
@@ -687,8 +711,19 @@ try:
                 logger.info(f"Working on segment: {dataset_train.start_idx}:{dataset_train.end_idx}; Total size: {dataset_train.total_size}")
 
             # Split sampler across ranks
-            sampler = torch.utils.data.DistributedSampler(dataset_train, shuffle=True) if uses_dist else None
-            dataloader = torch.utils.data.DataLoader(dataset_train, batch_size=batch_size, sampler=sampler, num_workers = num_workers, collate_fn=custom_collate)
+            sampler = torch.utils.data.DistributedSampler(
+                dataset_train,
+                shuffle   = True,
+                seed      = base_seed,
+                drop_last = drop_last_in_sampler
+            ) if uses_dist else None
+            dataloader = torch.utils.data.DataLoader(
+                dataset_train,
+                batch_size  = batch_size,
+                sampler     = sampler,
+                num_workers = num_workers,
+                collate_fn  = custom_collate,
+            )
 
             # Shuffle the training example
             if uses_dist:
@@ -700,7 +735,14 @@ try:
                 if dist_rank == 0:
                     dataset_eval_train.reset()
                     dataset_eval_train.set_start_idx(0)
-                    dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = None, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
+                    dataloader_eval = torch.utils.data.DataLoader(
+                        dataset_eval_train,
+                        batch_size  = batch_size,
+                        sampler     = None,
+                        num_workers = num_workers,
+                        shuffle     = False,
+                        collate_fn  = custom_collate,
+                    )
                     dataloader_eval_iter = iter(dataloader_eval)
                     logger.debug(f"[RANK {dist_rank}] Identifying the shape of batch_data...")
                     while batch_input_shape is None:
@@ -713,11 +755,15 @@ try:
                             raise ValueError(f"[RANK {dist_rank}] No valid eval data found for obtaining the input shape!!!")
                             break
                 if uses_dist:
-                    batch_input_shape = broadcast_dict(dict(batch_input_shape=batch_input_shape), src = 0, device = device).get('batch_input_shape')
+                    batch_input_shape = broadcast_dict(dict(batch_input_shape = batch_input_shape), src = 0, device = device).get('batch_input_shape')
 
             grad_nosync_counter = 0
             logger.debug(f"[RANK {dist_rank}] Start processing {len(dataloader)} batches at epoch {epoch}, seg {seg}.")
-            for batch_idx, batch_data in tqdm.tqdm(enumerate(dataloader), total = len(dataloader), desc = f'[RANK {dist_rank}] Mini batch'):    # (B, C, H, W)
+            for batch_idx, batch_data in tqdm.tqdm(
+                enumerate(dataloader),
+                total = len(dataloader),
+                desc  = f'[RANK {dist_rank}] Mini batch',
+            ):  # (B, C, H, W)
                 # -- Train one mini batch
                 # Create dummy data for a None batch
                 # FIXME: Better data cleaning will eliminate None batch
@@ -762,7 +808,7 @@ try:
                     scaler.update()
 
                     # Flush the gradients
-                    optimizer.zero_grad(set_to_none=True)
+                    optimizer.zero_grad(set_to_none = True)
 
                     # Reset grad accum counter
                     grad_nosync_counter = 0
@@ -803,15 +849,36 @@ try:
                     rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
                     dataset_eval_train.set_start_idx(rand_start_idx)
 
-                    sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_train, shuffle=True) if uses_dist else None
-                    dataloader_eval = torch.utils.data.DataLoader(dataset_eval_train, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
+                    sampler_eval = torch.utils.data.DistributedSampler(
+                        dataset_eval_train,
+                        shuffle   = True,
+                        seed      = base_seed,
+                        drop_last = drop_last_in_sampler,
+                    ) if uses_dist else None
+                    dataloader_eval = torch.utils.data.DataLoader(
+                        dataset_eval_train,
+                        batch_size  = batch_size,
+                        sampler     = sampler_eval,
+                        num_workers = num_workers,
+                        shuffle     = False,
+                        collate_fn  = custom_collate,
+                    )
 
                     # Shuffle the training example
                     if uses_dist:
                         sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
                     # Get loss
-                    train_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(training set)', device = device, dummy_input_shape = batch_input_shape, **data_dump_timestamp)
+                    train_loss = estimate_loss(
+                        dataloader_eval,
+                        model,
+                        autocast_context,
+                        max_iter          = max_eval_iter,
+                        desc              = '(training set)',
+                        device            = device,
+                        dummy_input_shape = batch_input_shape,
+                        **data_dump_timestamp,
+                    )
                     num_eval_retry += 1
 
                 # Log the train loss
@@ -830,8 +897,20 @@ try:
                     rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
                     dataset_eval_val.set_start_idx(rand_start_idx)
 
-                    sampler_eval = torch.utils.data.DistributedSampler(dataset_eval_val, shuffle=True) if uses_dist else None
-                    dataloader_eval = torch.utils.data.DataLoader(dataset_eval_val, batch_size=batch_size, sampler = sampler_eval, num_workers = num_workers, shuffle = False, collate_fn=custom_collate)
+                    sampler_eval = torch.utils.data.DistributedSampler(
+                        dataset_eval_val,
+                        shuffle   = True,
+                        seed      = base_seed,
+                        drop_last = drop_last_in_sampler,
+                    ) if uses_dist else None
+                    dataloader_eval = torch.utils.data.DataLoader(
+                        dataset_eval_val,
+                        batch_size  = batch_size,
+                        sampler     = sampler_eval,
+                        num_workers = num_workers,
+                        shuffle     = False,
+                        collate_fn  = custom_collate,
+                    )
 
                     # Shuffle the validation example
                     if uses_dist:

@@ -6,14 +6,15 @@ checkpoint:
   path_chkpt_prev            : null
   pretrain                   : null
 dataset:
-  batch_size     : 2
-  num_workers    : 2
-  path_train     : experiments/datasets/test.json
-  path_eval      : experiments/datasets/test.json
-  seg_size       : 20
-  entry_per_cycle: 1
-  debug          : false
-  server_address : [localhost, 5000]
+  drop_last_in_sampler: true
+  batch_size          : 2
+  num_workers         : 2
+  path_train          : experiments/datasets/test.json
+  path_eval           : experiments/datasets/test.json
+  seg_size            : 20
+  entry_per_cycle     : 1
+  debug               : false
+  server_address      : [localhost, 5000]
   transforms:
     norm:
       Rayonix:
