@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from maxie.datasets.psana_utils import PsanaImg
-from maxie.datasets.utils import split_list_into_chunk
+from maxie.utils.data import split_list_into_chunk
 
 import multiprocessing
 import os
