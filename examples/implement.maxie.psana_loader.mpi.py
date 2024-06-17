@@ -10,7 +10,7 @@ import argparse
 
 from maxie.datasets.psana_dataset import PsanaDataset
 from maxie.datasets.psana_utils   import PsanaImg
-from maxie.datasets.utils         import split_list_into_chunk
+from maxie.utils.data             import split_list_into_chunk
 
 # Set up MPI
 from mpi4py import MPI
