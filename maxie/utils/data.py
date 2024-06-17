@@ -1,8 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import logging
 import random
+import more_itertools
+
+from math import ceil
+
+import logging
 
 logger = logging.getLogger(__name__)
 
@@ -34,45 +38,10 @@ def split_dataset(dataset_list, fracA, seed = None):
 
 
 def split_list_into_chunk(input_list, max_num_chunk = 2):
+    '''
+    [1, 2, 3, 4, 5, 6], 2 -> [iter([1, 2, 3]), iter(4, 5, 6)]
 
-    chunk_size = len(input_list) // max_num_chunk + 1
-
-    size_list = len(input_list)
-
-    chunked_list = []
-    for idx_chunk in range(max_num_chunk):
-        idx_b = idx_chunk * chunk_size
-        idx_e = idx_b + chunk_size
-        ## if idx_chunk == max_num_chunk - 1: idx_e = len(input_list)
-        if idx_e >= size_list: idx_e = size_list
-
-        seg = input_list[idx_b : idx_e]
-        chunked_list.append(seg)
-
-        if idx_e == size_list: break
-
-    return chunked_list
-
-
-def split_dict_into_chunk(input_dict, max_num_chunk = 2):
-
-    chunk_size = len(input_dict) // max_num_chunk + 1
-
-    size_dict = len(input_dict)
-    kv_iter   = iter(input_dict.items())
-
-    chunked_dict_in_list = []
-    for idx_chunk in range(max_num_chunk):
-        chunked_dict = {}
-        idx_b = idx_chunk * chunk_size
-        idx_e = idx_b + chunk_size
-        if idx_e >= size_dict: idx_e = size_dict
-
-        for _ in range(idx_e - idx_b):
-            k, v = next(kv_iter)
-            chunked_dict[k] = v
-        chunked_dict_in_list.append(chunked_dict)
-
-        if idx_e == size_dict: break
-
-    return chunked_dict_in_list
+    For splitting a dictionary, users can turn the dictionary into a list of
+    tuples using input_dict.items().
+    '''
+    return more_itertools.divide(max_num_chunk, input_list)
