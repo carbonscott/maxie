@@ -1,8 +1,10 @@
-exp: 'mfxl1027522'
-run: 0
-access_mode: 'idx'
-detector_name: 'epix10k2M'
-num_cpus: 10
+exp           : 'mfxl1027522'
+run           : 0
+access_mode   : 'idx'
+detector_name : 'epix10k2M'
+num_cpus      : 10
+max_num_events: null
+postfix       : null
 
 hydra:
   run:
