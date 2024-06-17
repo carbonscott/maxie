@@ -298,7 +298,7 @@ backward_prefetch = BackwardPrefetch.BACKWARD_PRE
 # ----------------------------------------------------------------------- #
 #  LOGGING
 # ----------------------------------------------------------------------- #
-# Fetch the current timestamp...
+# Fetch the current timestamp
 timestamp = init_logger(
     uses_dist,
     dist_rank,
@@ -309,10 +309,10 @@ timestamp = init_logger(
 )
 
 if dist_rank == 0:
-    # Convert dictionary to yaml formatted string...
+    # Convert dictionary to yaml formatted string
     config_yaml = yaml.dump(config)
 
-    # Log the config...
+    # Log the config
     logger.info(config_yaml)
 
 # ----------------------------------------------------------------------- #
@@ -434,12 +434,12 @@ if from_resume:
         # Model is loaded
         checkpointer.pre_fsdp_load()
 
-# -- Wrapping the model in FSDP...
+# -- Wrapping the model in FSDP
 if uses_dist:
-    # Convert BatchNorm to SyncBatchNorm...
+    # Convert BatchNorm to SyncBatchNorm
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
-    # Wrap it up using FSDP...
+    # Wrap it up using FSDP
     model = FSDP(
         model,
         auto_wrap_policy  = auto_wrap_policy,
@@ -916,7 +916,16 @@ try:
                     if uses_dist:
                         sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
-                    validate_loss = estimate_loss(dataloader_eval, model, autocast_context, max_iter = max_eval_iter, desc = '(validation set)', device = device, dummy_input_shape = batch_input_shape, **data_dump_timestamp)
+                    validate_loss = estimate_loss(
+                        dataloader_eval,
+                        model,
+                        autocast_context,
+                        max_iter          = max_eval_iter,
+                        desc              = '(validation set)',
+                        device            = device,
+                        dummy_input_shape = batch_input_shape,
+                        **data_dump_timestamp,
+                    )
                     num_eval_retry += 1
 
                 # Log the validation loss
