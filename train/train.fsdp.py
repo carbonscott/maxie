@@ -674,6 +674,7 @@ def is_last_batch(batch_idx, num_batches):
 batch_input_shape = None
 preempt_metadata_path = os.environ.get('PREEMPT_METADATA_PATH', None)
 logger.debug(f'[RANK {dist_rank}] Ready for training loop...')
+iteration_counter = 0  # One iteration is one param update after one or a few forward/backward pass
 try:
     # Only increment starting epoch if current epoch was fully completed
     for epoch in tqdm.tqdm(range(max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
@@ -792,29 +793,15 @@ try:
                 # Refer to https://github.com/pytorch/pytorch/blob/6c4f43f82675b5fcfe8cf3e5983d0c0f326408aa/test/distributed/fsdp/test_fsdp_grad_acc.py#L180
                 is_grad_sync_required = is_last_batch(batch_idx, len(dataloader)) or is_action_due(grad_nosync_counter, grad_accum_steps)
                 with grad_sync_context(is_grad_sync_required):
-                    # Forward
+                    # --- Forward
                     with autocast_context:
                         batch_output = model(batch_input)
                         loss = batch_output.loss  # Refer to https://github.com/huggingface/transformers/blob/e34da3ee3c9d2d628fdbeb60cee45c4f8f32945a/src/transformers/models/vit_mae/modeling_vit_mae.py#L1001
                         loss = loss / grad_accum_loss_normalizer  # scale the loss to account for gradient accumulation
 
-                    # Log the training loop loss
                     total_loss += loss.item()
-                    dist.all_reduce(total_loss, op = dist.ReduceOp.AVG)  # Avg across ranks
-                    if dist_rank == 0:
-                        current_lr    = scheduler.get_lr()
-                        seg_start_idx = dataset_train.start_idx
-                        seg_end_idx   = dataset_train.end_idx
-                        logger.info(
-                            f"[RANK {dist_rank}] LOSS:TRAIN - epoch {epoch}, "
-                            f"lr = {current_lr}, "
-                            f"seg {seg_start_idx}-{seg_end_idx}, "
-                            f"mini_batch {batch_idx}, "
-                            f"mean train loss = {total_loss:.6f}, "
-                            f"grad_sync = {is_grad_sync_required}"
-                        )
 
-                    # Backward
+                    # --- Backward
                     scaler.scale(loss).backward()
 
                 # Increment the grad nosync counter
@@ -825,11 +812,28 @@ try:
                     # Grad clipping
                     if grad_clip != 0.0:
                         scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-                    # Update parameters
+                    # --- Update parameters
                     scaler.step(optimizer)
                     scaler.update()
+
+                    # Increment the iteration counter after param update
+                    iteration_counter += 1
+
+                    # Log the training loop loss after a forward/backward/update
+                    dist.all_reduce(total_loss, op = dist.ReduceOp.AVG)  # Avg across ranks
+                    if dist_rank == 0:
+                        current_lr    = scheduler.get_lr()
+                        seg_start_idx = dataset_train.start_idx
+                        seg_end_idx   = dataset_train.end_idx
+                        logger.info(
+                            f"[RANK {dist_rank}] LOSS:TRAIN - "
+                            f"iter {iteration_counter}, "
+                            f"lr = {current_lr}, "
+                            f"seg {seg_start_idx}-{seg_end_idx}, "
+                            f"mean train loss = {total_loss:.6f}, "
+                        )
 
                     # Flush the gradients
                     optimizer.zero_grad(set_to_none = True)
@@ -841,12 +845,11 @@ try:
                     total_loss = 0
 
             # -- Update lr every few seg (X segs = one step/iteration)
-            total_seg = seg + epoch * dataset_train.num_seg
-            if is_action_due(total_seg, scheduler_step_period):
+            if is_action_due(iteration_counter, scheduler_step_period):
                 scheduler.step()
 
             # -- Eval and checkpointing
-            if is_action_due(total_seg, chkpt_saving_period):
+            if is_action_due(iteration_counter, chkpt_saving_period):
                 # !!!!!!!!!!!!!!!
                 # !! Data dump !!
                 # !!!!!!!!!!!!!!!
@@ -987,7 +990,7 @@ try:
                 logger.debug(f'[RANK {dist_rank}] Done evaluation...')
 
             # -- Preemptive checkpointing
-            if preempt_metadata_path is not None and is_action_due(total_seg, preempt_chkpt_saving_period):
+            if preempt_metadata_path is not None and is_action_due(iteration_counter, preempt_chkpt_saving_period):
                 # Collect training state
                 training_state.epoch     = epoch
                 training_state.seg       = seg
