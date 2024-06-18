@@ -134,6 +134,7 @@ dataset_config       = config.get("dataset")
 path_train_json      = dataset_config.get("path_train")
 path_eval_json       = dataset_config.get("path_eval")
 drop_last_in_sampler = dataset_config.get("drop_last_in_sampler")
+drop_last_in_loader  = dataset_config.get("drop_last_in_loader")
 batch_size           = dataset_config.get("batch_size")
 num_workers          = dataset_config.get("num_workers")
 seg_size             = dataset_config.get("seg_size")
@@ -298,7 +299,7 @@ backward_prefetch = BackwardPrefetch.BACKWARD_PRE
 # ----------------------------------------------------------------------- #
 #  LOGGING
 # ----------------------------------------------------------------------- #
-# Fetch the current timestamp
+# Fetch the current timestamp...
 timestamp = init_logger(
     uses_dist,
     dist_rank,
@@ -309,10 +310,10 @@ timestamp = init_logger(
 )
 
 if dist_rank == 0:
-    # Convert dictionary to yaml formatted string
+    # Convert dictionary to yaml formatted string...
     config_yaml = yaml.dump(config)
 
-    # Log the config
+    # Log the config...
     logger.info(config_yaml)
 
 # ----------------------------------------------------------------------- #
@@ -723,6 +724,7 @@ try:
                 sampler     = sampler,
                 num_workers = num_workers,
                 collate_fn  = custom_collate,
+                drop_last   = drop_last_in_loader,
             )
 
             # Shuffle the training example
@@ -774,6 +776,9 @@ try:
                 batch_input = batch_data
                 batch_input = batch_input.to(device, non_blocking = True)
 
+                # Accumulate the loss over all examples per rank
+                loss_per_rank = 0.0
+
                 # Conditionally turn off grad sync for grad accumulation to simulate a larger batch unless the sync is due or the last batch
                 # Refer to https://github.com/pytorch/pytorch/blob/6c4f43f82675b5fcfe8cf3e5983d0c0f326408aa/test/distributed/fsdp/test_fsdp_grad_acc.py#L180
                 is_grad_sync_required = is_last_batch(batch_idx, len(dataloader)) or is_action_due(grad_nosync_counter, grad_accum_steps)
@@ -785,6 +790,7 @@ try:
                         loss = loss / grad_accum_steps  # scale the loss to account for gradient accumulation
 
                     # Log the training loop loss
+                    ##[NEW] dist.all_reduce(loss_accum, op = dist.ReduceOp.AVG)
                     if dist_rank == 0:
                         seg_start_idx = dataset_train.start_idx
                         seg_end_idx   = dataset_train.end_idx
@@ -862,6 +868,7 @@ try:
                         num_workers = num_workers,
                         shuffle     = False,
                         collate_fn  = custom_collate,
+                        drop_last   = drop_last_in_loader,
                     )
 
                     # Shuffle the training example
@@ -910,6 +917,7 @@ try:
                         num_workers = num_workers,
                         shuffle     = False,
                         collate_fn  = custom_collate,
+                        drop_last   = drop_last_in_loader,
                     )
 
                     # Shuffle the validation example

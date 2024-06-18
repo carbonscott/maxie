@@ -7,6 +7,7 @@ checkpoint:
   pretrain                   : null
 dataset:
   drop_last_in_sampler: true
+  drop_last_in_loader : true
   batch_size          : 2
   num_workers         : 2
   path_train          : experiments/datasets/test.json
