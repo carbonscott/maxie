@@ -1,10 +1,10 @@
 checkpoint:
-  chkpt_saving_period        : 1
-  preempt_chkpt_saving_period: 1
-  directory                  : experiments/chkpts
-  prefix                     : fsdp
-  path_chkpt_prev            : null
-  pretrain                   : null
+  chkpt_saving_iterations        : 1
+  preempt_chkpt_saving_iterations: 1
+  directory                      : experiments/chkpts
+  prefix                         : fsdp
+  path_chkpt_prev                : null
+  pretrain                       : null
 dataset:
   drop_last_in_sampler: true
   drop_last_in_loader : true
@@ -49,11 +49,11 @@ logging:
 loss:
   grad_accum_steps: 10
 lr_scheduler:
-  min_lr                : !!float 1e-7
-  total_iterations      : !!int 1_000_000
-  uses_prev             : true
-  warmup_iterations     : 5
-  scheduler_step_period : 20
+  min_lr                     : !!float 1e-7
+  total_iterations           : !!int 1_000_000
+  uses_prev                  : true
+  warmup_iterations          : 5
+  scheduler_update_iterations: 20
 misc:
   max_epochs          : 5
   max_eval_iter       : 50
