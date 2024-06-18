@@ -677,7 +677,7 @@ logger.debug(f'[RANK {dist_rank}] Ready for training loop...')
 try:
     # Only increment starting epoch if current epoch was fully completed
     for epoch in tqdm.tqdm(range(max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
-        # -- Skip epochs up to, but not including the last_epoch
+        # Skip epochs up to, but not including the last_epoch
         if epoch < last_epoch: continue
 
         # -- Train one epoch
@@ -693,7 +693,7 @@ try:
 
         # Only increment starting seg idx if still processing current epoch otherwise reset to 0
         for seg in tqdm.tqdm(range(dataset_train.num_seg), desc = f'[RANK {dist_rank}] Segment'):
-            # -- Skip previous segments up to and including the last_seg
+            # Skip previous segments up to and including the last_seg
             if seg <= last_seg: continue
 
             # -- Train one segment
@@ -701,10 +701,10 @@ try:
             if dist_local_rank == 0:
                 memmax.start()
 
-            # -- Switch to training state
+            # Switch to training state
             model.train()
 
-            # -- Prepare training on one segment (iteration)
+            # Prepare training on one segment (iteration)
             # Set next segment
             dataset_train.set_start_idx(dataset_train.end_idx)
 
@@ -759,11 +759,20 @@ try:
                 if uses_dist:
                     batch_input_shape = broadcast_dict(dict(batch_input_shape = batch_input_shape), src = 0, device = device).get('batch_input_shape')
 
-            grad_nosync_counter = 0
+            # Set up gradient accumulation helper variables
+            grad_nosync_counter         = 0
+            num_batches                 = len(dataloader)
+            num_remainder_batches       = num_batches % grad_accum_steps
+            start_idx_remainder_batches = num_batches - num_remainder_batches  # e.g. total=102, steps=5, idx = 102 - 102%5 = 100
+
+            # Aggregate the loss during each gradient accumulation
+            total_loss = 0.0
+
+            # -- Loop over mini batches
             logger.debug(f"[RANK {dist_rank}] Start processing {len(dataloader)} batches at epoch {epoch}, seg {seg}.")
             for batch_idx, batch_data in tqdm.tqdm(
                 enumerate(dataloader),
-                total = len(dataloader),
+                total = num_batches,
                 desc  = f'[RANK {dist_rank}] Mini batch',
             ):  # (B, C, H, W)
                 # -- Train one mini batch
@@ -776,8 +785,8 @@ try:
                 batch_input = batch_data
                 batch_input = batch_input.to(device, non_blocking = True)
 
-                # Accumulate the loss over all examples per rank
-                loss_per_rank = 0.0
+                # Specify the normalizer for scaling the loss
+                grad_accum_loss_normalizer = grad_accum_steps if batch_idx < start_idx_remainder_batches else num_remainder_batches
 
                 # Conditionally turn off grad sync for grad accumulation to simulate a larger batch unless the sync is due or the last batch
                 # Refer to https://github.com/pytorch/pytorch/blob/6c4f43f82675b5fcfe8cf3e5983d0c0f326408aa/test/distributed/fsdp/test_fsdp_grad_acc.py#L180
@@ -787,14 +796,23 @@ try:
                     with autocast_context:
                         batch_output = model(batch_input)
                         loss = batch_output.loss  # Refer to https://github.com/huggingface/transformers/blob/e34da3ee3c9d2d628fdbeb60cee45c4f8f32945a/src/transformers/models/vit_mae/modeling_vit_mae.py#L1001
-                        loss = loss / grad_accum_steps  # scale the loss to account for gradient accumulation
+                        loss = loss / grad_accum_loss_normalizer  # scale the loss to account for gradient accumulation
 
                     # Log the training loop loss
-                    ##[NEW] dist.all_reduce(loss_accum, op = dist.ReduceOp.AVG)
+                    total_loss += loss.item()
+                    dist.all_reduce(total_loss, op = dist.ReduceOp.AVG)  # Avg across ranks
                     if dist_rank == 0:
+                        current_lr    = scheduler.get_lr()
                         seg_start_idx = dataset_train.start_idx
                         seg_end_idx   = dataset_train.end_idx
-                        logger.info(f"[RANK {dist_rank}] LOSS:TRAIN - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mini_batch {batch_idx}, mean train loss = {loss:.8f} grad_sync = {is_grad_sync_required}")
+                        logger.info(
+                            f"[RANK {dist_rank}] LOSS:TRAIN - epoch {epoch}, "
+                            f"lr = {current_lr}, "
+                            f"seg {seg_start_idx}-{seg_end_idx}, "
+                            f"mini_batch {batch_idx}, "
+                            f"mean train loss = {total_loss:.6f}, "
+                            f"grad_sync = {is_grad_sync_required}"
+                        )
 
                     # Backward
                     scaler.scale(loss).backward()
@@ -818,6 +836,9 @@ try:
 
                     # Reset grad accum counter
                     grad_nosync_counter = 0
+
+                    # Reset the loss accumulator
+                    total_loss = 0
 
             # -- Update lr every few seg (X segs = one step/iteration)
             total_seg = seg + epoch * dataset_train.num_seg
