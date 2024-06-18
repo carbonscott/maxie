@@ -122,12 +122,12 @@ with open(fl_yaml, 'r') as fh:
     config = yaml.safe_load(fh)
 
 # -- Checkpoint
-chkpt_config                = config.get("checkpoint")
-dir_root_chkpt              = chkpt_config.get("directory")
-fl_chkpt_prefix             = chkpt_config.get("prefix")
-path_chkpt_prev             = chkpt_config.get("path_chkpt_prev")
-chkpt_saving_period         = chkpt_config.get("chkpt_saving_period")
-preempt_chkpt_saving_period = chkpt_config.get("preempt_chkpt_saving_period")
+chkpt_config                    = config.get("checkpoint")
+dir_root_chkpt                  = chkpt_config.get("directory")
+fl_chkpt_prefix                 = chkpt_config.get("prefix")
+path_chkpt_prev                 = chkpt_config.get("path_chkpt_prev")
+chkpt_saving_iterations         = chkpt_config.get("chkpt_saving_iterations")
+preempt_chkpt_saving_iterations = chkpt_config.get("preempt_chkpt_saving_iterations")
 
 # -- Dataset
 dataset_config       = config.get("dataset")
@@ -171,13 +171,13 @@ weight_decay = float(optim_config.get("weight_decay"))
 grad_clip    = float(optim_config.get("grad_clip"))
 
 # -- Scheduler
-lr_scheduler_config   = config.get("lr_scheduler")
-patience              = lr_scheduler_config.get("patience")
-warmup_iterations     = lr_scheduler_config.get("warmup_iterations")
-total_iterations      = lr_scheduler_config.get("total_iterations")
-uses_prev_scheduler   = lr_scheduler_config.get("uses_prev")
-min_lr                = float(lr_scheduler_config.get("min_lr"))
-scheduler_step_period = lr_scheduler_config.get("scheduler_step_period")
+lr_scheduler_config         = config.get("lr_scheduler")
+patience                    = lr_scheduler_config.get("patience")
+warmup_iterations           = lr_scheduler_config.get("warmup_iterations")
+total_iterations            = lr_scheduler_config.get("total_iterations")
+uses_prev_scheduler         = lr_scheduler_config.get("uses_prev")
+min_lr                      = float(lr_scheduler_config.get("min_lr"))
+scheduler_update_iterations = lr_scheduler_config.get("scheduler_update_iterations")
 
 # -- Distributed envs
 dist_config            = config.get("dist")
@@ -845,11 +845,11 @@ try:
                     total_loss = 0
 
             # -- Update lr every few seg (X segs = one step/iteration)
-            if is_action_due(iteration_counter, scheduler_step_period):
+            if is_action_due(iteration_counter, scheduler_update_iterations):
                 scheduler.step()
 
             # -- Eval and checkpointing
-            if is_action_due(iteration_counter, chkpt_saving_period):
+            if is_action_due(iteration_counter, chkpt_saving_iterations):
                 # !!!!!!!!!!!!!!!
                 # !! Data dump !!
                 # !!!!!!!!!!!!!!!
@@ -990,7 +990,7 @@ try:
                 logger.debug(f'[RANK {dist_rank}] Done evaluation...')
 
             # -- Preemptive checkpointing
-            if preempt_metadata_path is not None and is_action_due(iteration_counter, preempt_chkpt_saving_period):
+            if preempt_metadata_path is not None and is_action_due(iteration_counter, preempt_chkpt_saving_iterations):
                 # Collect training state
                 training_state.epoch     = epoch
                 training_state.seg       = seg
