@@ -10,6 +10,7 @@ import yaml
 import tqdm
 import signal
 import argparse
+import inspect
 import logging
 import traceback
 
@@ -167,6 +168,9 @@ grad_accum_steps = max(int(loss_config.get("grad_accum_steps")), 1)
 optim_config = config.get("optim")
 lr           = float(optim_config.get("lr"))
 weight_decay = float(optim_config.get("weight_decay"))
+adam_beta1   = float(optim_config.get("beta1"))
+adam_beta2   = float(optim_config.get("beta2"))
+adam_fused   = float(optim_config.get("fused"))
 grad_clip    = float(optim_config.get("grad_clip"))
 
 # -- Scheduler
@@ -486,9 +490,14 @@ logger.debug(f'[RANK {dist_rank}] Configuring criterion (Skip, it is configured 
 # ----------------------------------------------------------------------- #
 logger.debug(f'[RANK {dist_rank}] Configuring optimizer...')
 param_iter = model.parameters()
-optimizer = optim.AdamW(param_iter,
-                        lr = lr,
-                        weight_decay = weight_decay)
+optim_arg_dict = dict(
+    lr           = lr,
+    weight_decay = weight_decay,
+    betas        = (adam_beta1, adam_beta2),
+)
+if 'fused' in inspect.signature(optim.AdamW).parameters:
+    optim_arg_dict['fused'] = adam_fused
+optimizer = optim.AdamW(param_iter, **optim_arg_dict)
 scheduler = CosineLRScheduler(optimizer         = optimizer,
                               warmup_iterations = warmup_iterations,
                               total_iterations  = total_iterations,
