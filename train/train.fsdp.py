@@ -774,8 +774,12 @@ try:
             num_remainder_batches       = num_batches % grad_accum_steps
             start_idx_remainder_batches = num_batches - num_remainder_batches  # e.g. total=102, steps=5, idx = 102 - 102%5 = 100
 
-            # Aggregate the loss during each gradient accumulation
-            total_loss = 0.0
+            # Aggregate the loss and number of processed tokens during each gradient accumulation
+            total_loss       = 0.0
+            total_num_tokens = 0
+
+            # Set a timer flag
+            starts_timer = True
 
             # -- Loop over mini batches
             logger.debug(f"[RANK {dist_rank}] Start processing {len(dataloader)} batches at epoch {epoch}, seg {seg}.")
@@ -784,6 +788,11 @@ try:
                 total = num_batches,
                 desc  = f'[RANK {dist_rank}] Mini batch',
             ):  # (B, C, H, W)
+                # Start timer???
+                if starts_timer:
+                    t_start = time.monotonic()
+                    starts_timer = False
+
                 # -- Train one mini batch
                 # Create dummy data for a None batch
                 # FIXME: Better data cleaning will eliminate None batch
@@ -794,22 +803,29 @@ try:
                 batch_input = batch_data
                 batch_input = batch_input.to(device, non_blocking = True)
 
-                # Specify the normalizer for scaling the loss
-                grad_accum_loss_normalizer = grad_accum_steps if batch_idx < start_idx_remainder_batches else num_remainder_batches
+                # Specify the effective grad accum steps
+                real_grad_accum_steps = grad_accum_steps if batch_idx < start_idx_remainder_batches else num_remainder_batches
 
                 # Conditionally turn off grad sync for grad accumulation to simulate a larger batch unless the sync is due or the last batch
                 # Refer to https://github.com/pytorch/pytorch/blob/6c4f43f82675b5fcfe8cf3e5983d0c0f326408aa/test/distributed/fsdp/test_fsdp_grad_acc.py#L180
                 is_grad_sync_required = is_last_batch(batch_idx, len(dataloader)) or is_action_due(grad_nosync_counter, grad_accum_steps)
                 with grad_sync_context(is_grad_sync_required):
-                    # --- Forward
+                    # Forward
                     with autocast_context:
                         batch_output = model(batch_input)
                         loss = batch_output.loss  # Refer to https://github.com/huggingface/transformers/blob/e34da3ee3c9d2d628fdbeb60cee45c4f8f32945a/src/transformers/models/vit_mae/modeling_vit_mae.py#L1001
-                        loss = loss / grad_accum_loss_normalizer  # scale the loss to account for gradient accumulation
+                        loss = loss / real_grad_accum_steps  # scale the loss to account for gradient accumulation
 
+                    # Accumulate loss
                     total_loss += loss.item()
 
-                    # --- Backward
+                    # Accumulate number of tokens processed
+                    total_numel = batch_data.numel()  # Get number of numeric elements
+                    token_size  = model.config.patch_size**2
+                    num_tokens  = total_numel / token_size
+                    total_num_tokens += num_tokens
+
+                    # Backward
                     scaler.scale(loss).backward()
 
                 # Increment the grad nosync counter
@@ -822,25 +838,42 @@ try:
                         scaler.unscale_(optimizer)
                         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-                    # --- Update parameters
+                    # Update parameters
                     scaler.step(optimizer)
                     scaler.update()
 
                     # Increment the iteration counter after param update
                     iteration_counter += 1
 
-                    # Log the training loop loss after a forward/backward/update
+                    # Obtain the mean total loss
                     dist.all_reduce(total_loss, op = dist.ReduceOp.AVG)  # Avg across ranks
+
+                    # Obtain the total number of tokens processed
+                    dist.all_reduce(total_num_tokens, op = dist.ReduceOp.SUM)  # Sum across ranks
+
+                    # Wait for all gpus to complete work
+                    if device_type == "cuda":
+                        torch.cuda.synchronize()
+
+                    # Stop timer
+                    t_end = time.monotonic()
+
+                    # Calculate tokens per second
+                    t_delta = t_end - t_start
+                    tokens_per_sec = total_num_tokens / t_delta
+
+                    # Log the training loop loss after a forward/backward/update
                     if dist_rank == 0:
                         current_lr    = scheduler.get_lr()
                         seg_start_idx = dataset_train.start_idx
                         seg_end_idx   = dataset_train.end_idx
                         logger.info(
                             f"[RANK {dist_rank}] LOSS:TRAIN - "
-                            f"iter {iteration_counter}, "
-                            f"lr = {current_lr}, "
                             f"seg {seg_start_idx}-{seg_end_idx}, "
-                            f"mean train loss = {total_loss:.6f}, "
+                            f"iter {iteration_counter}, "
+                            f"lr: {current_lr}, "
+                            f"mean train loss: {total_loss:.6f}, "
+                            f"tokens per sec: {tokens_per_sec}"
                         )
 
                     # Flush the gradients
@@ -850,7 +883,13 @@ try:
                     grad_nosync_counter = 0
 
                     # Reset the loss accumulator
-                    total_loss = 0
+                    total_loss = 0.0
+
+                    # Reset the token accumulator
+                    total_num_tokens = 0
+
+                    # Reset timer flag
+                    starts_timer = True
 
             # -- Update lr every few seg (X segs = one step/iteration)
             if is_action_due(iteration_counter, scheduler_update_iterations):
