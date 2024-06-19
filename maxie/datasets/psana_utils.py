@@ -1,10 +1,31 @@
 import numpy as np
 import psana
 
+def apply_mask(data, mask, mask_value = np.nan):
+    """
+    Return masked data.
+
+    Args:
+        data: numpy.ndarray with the shape of (B, H, W).·
+              - B: batch of images.
+              - H: height of an image.
+              - W: width of an image.
+
+        mask: numpy.ndarray with the shape of (B, H, W).·
+
+    Returns:
+        data_masked: numpy.ndarray.
+    """
+    # Mask unwanted pixels with np.nan...
+    data_masked = np.where(mask, data, mask_value)
+
+    return data_masked
+
+
 class PsanaImg:
     """
     It serves as an image accessing layer based on the data management system
-    psana in LCLS.  
+    psana in LCLS.
     """
 
     def __init__(self, exp, run, mode, detector_name):
@@ -24,6 +45,9 @@ class PsanaImg:
                       "calib" : self.detector.calib,
                       "image" : self.detector.image,
                       "mask"  : self.detector.mask, }
+
+        # Set the flag about using a bad pixel mask
+        self.cached_bad_pixel_mask = self.create_bad_pixel_mask()
 
 
     def __len__(self):
@@ -65,10 +89,59 @@ class PsanaImg:
 
 
     def create_bad_pixel_mask(self):
-        return self.read["mask"](self.run_current, calib       = True,
-                                                   status      = True,
-                                                   edges       = True,
-                                                   central     = True,
-                                                   unbond      = True,
-                                                   unbondnbrs  = True,
-                                                   unbondnbrs8 = False).astype(np.uint16)
+        mask_bad_pixel = None
+        try:
+            mask_bad_pixel = self.read["mask"](
+                self.run_current,
+                calib       = True,
+                status      = True,
+                edges       = True,
+                central     = True,
+                unbond      = True,
+                unbondnbrs  = True,
+                unbondnbrs8 = False
+            ).astype(np.uint16)
+        except:
+            print("Error in accessing the bad pixel mask!!!")
+
+        return mask_bad_pixel
+
+
+    def get_masked(self, event_num, id_panel = None, mode = "calib", returns_assemble = False, edge_width = None):
+        img = self.get(event_num, id_panel, mode)
+
+        if edge_width is not None:
+            img[..., :edge_width , :           ] = 0  # Top
+            img[..., :           , :edge_width ] = 0  # Left
+            img[..., -edge_width:, :           ] = 0  # Bottom
+            img[..., :           , -edge_width:] = 0  # Right
+
+        if self.cached_bad_pixel_mask is not None:
+            img= PsanaImg.apply_mask(img, self.cached_bad_pixel_mask, 0.0)
+
+        if returns_assemble:
+            img = self.assemble(img)
+
+        return img
+
+
+    @staticmethod
+    def apply_mask(data, mask, mask_value = np.nan):
+        """
+        Return masked data.
+
+        Args:
+            data: numpy.ndarray with the shape of (B, H, W).·
+                  - B: batch of images.
+                  - H: height of an image.
+                  - W: width of an image.
+
+            mask: numpy.ndarray with the shape of (B, H, W).·
+
+        Returns:
+            data_masked: numpy.ndarray.
+        """
+        # Mask unwanted pixels with np.nan...
+        data_masked = np.where(mask, data, mask_value)
+
+        return data_masked
