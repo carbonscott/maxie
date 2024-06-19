@@ -74,8 +74,6 @@ from torch.distributed.fsdp.wrap import (
 )
 from transformers.models.vit_mae.modeling_vit_mae import (
     ViTMAELayer,
-    ## ViTMAEAttention,
-    ## ViTMAESelfAttention,
 )
 from packaging import version
 
@@ -159,6 +157,7 @@ sampling_fraction    = transforms_config.get("sampling_fraction", None)
 model_params = config.get("model")
 model_name   = model_params.get("name")
 mask_ratio   = model_params.get("mask_ratio")
+from_scratch = model_params.get("from_scratch")
 
 # -- Loss
 loss_config      = config.get("loss")
@@ -175,7 +174,6 @@ lr_scheduler_config         = config.get("lr_scheduler")
 patience                    = lr_scheduler_config.get("patience")
 warmup_iterations           = lr_scheduler_config.get("warmup_iterations")
 total_iterations            = lr_scheduler_config.get("total_iterations")
-uses_prev_scheduler         = lr_scheduler_config.get("uses_prev")
 min_lr                      = float(lr_scheduler_config.get("min_lr"))
 scheduler_update_iterations = lr_scheduler_config.get("scheduler_update_iterations")
 
@@ -381,8 +379,9 @@ def custom_collate(batch):
 logger.debug(f'[RANK {dist_rank}] Configuring model...')
 # -- Config the model
 model_config = AdaptedViTMAEForPreTrainingConfig(
-    model_name = model_name,
-    mask_ratio = mask_ratio,
+    model_name   = model_name,
+    mask_ratio   = mask_ratio,
+    from_scratch = from_scratch,
 )
 model = AdaptedViTMAEForPreTraining(model_config)
 if not uses_dist: model.to(device)
@@ -462,8 +461,8 @@ if uses_dist:
 grad_sync_context = lambda enables_sync: nullcontext() if enables_sync or not uses_dist else model.no_sync()
 
 
-# -- [TODO] Apply activation checkpointing
-ac_layer = None
+# -- Apply activation checkpointing
+ac_layer = ViTMAELayer
 if ac_layer is not None:
     check_fn = lambda submodule: isinstance(submodule, ac_layer)
     apply_activation_checkpointing(
