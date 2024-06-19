@@ -30,6 +30,7 @@ def update_num_channels(model, new_channels=1):
 class AdaptedViTMAEForPreTrainingConfig:
     model_name: str   = "facebook/vit-mae-base"
     mask_ratio: float = 0.75
+    from_scratch      = False
 
 class AdaptedViTMAEForPreTraining(nn.Module):
     NUM_RGB_CHANNEL    = 3
@@ -42,6 +43,10 @@ class AdaptedViTMAEForPreTraining(nn.Module):
             self.config.model_name,
             self.config.mask_ratio,
         )
+
+        # Conditionally init from scratch
+        if self.config.from_scratch:
+            self.model.apply(self._init_weights)
 
     @staticmethod
     def adapt_pretrained_model(model_name, mask_ratio):
@@ -90,3 +95,14 @@ class AdaptedViTMAEForPreTraining(nn.Module):
 
     def forward(self, x):
         return self.model(x)
+
+    def _init_weights(self, module):
+        """ Refer to https://github.com/facebookresearch/mae/blob/main/models_mae.py
+        """
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.constant_(module.bias, 0)
+            nn.init.constant_(module.weight, 1.0)
