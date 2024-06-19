@@ -55,7 +55,8 @@ def worker_process(server_socket, timeout):
                 # Fetch psana image data
                 psana_img = get_psana_img(exp, run, access_mode, detector_name)
                 with Timer(tag=None, is_on=True) as t:
-                    data = psana_img.get(event, None, mode)
+                    ## data = psana_img.get(event, None, mode)
+                    data = psana_img.get_masked(event, None, mode, returns_assemble = True, edge_width = 1)
 
                 if data is None:
                     raise ValueError(f"Received None from exp={exp}, run={run}, event={event}!!!")

@@ -107,8 +107,8 @@ class PsanaImg:
         return mask_bad_pixel
 
 
-    def get_masked(self, event_num, id_panel = None, mode = "calib", returns_assemble = False, edge_width = None):
-        img = self.get(event_num, id_panel, mode)
+    def get_masked(self, event_num, id_panel = None, returns_assemble = False, edge_width = None):
+        img = self.get(event_num, id_panel, 'calib')
 
         if edge_width is not None:
             img[..., :edge_width , :           ] = 0  # Top
