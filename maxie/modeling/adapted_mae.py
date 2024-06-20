@@ -28,9 +28,9 @@ def update_num_channels(model, new_channels=1):
 # ----------------------------------------------------------------------- #
 @dataclass
 class AdaptedViTMAEForPreTrainingConfig:
-    model_name: str   = "facebook/vit-mae-base"
-    mask_ratio: float = 0.75
-    from_scratch      = False
+    model_name  : str   = "facebook/vit-mae-base"
+    mask_ratio  : float = 0.75
+    from_scratch: bool  = False
 
 class AdaptedViTMAEForPreTraining(nn.Module):
     NUM_RGB_CHANNEL    = 3
