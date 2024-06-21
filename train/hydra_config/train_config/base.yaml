@@ -61,6 +61,7 @@ misc:
   uses_mixed_precision: true
   compiles_model      : false
   data_dump_on        : false
+  peak_flops_per_sec  : !!float 112e12
 model:
   name: 'facebook/vit-mae-base'
   mask_ratio: 0.75

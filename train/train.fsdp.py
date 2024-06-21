@@ -194,13 +194,14 @@ fl_log_prefix  = logging_config.get("prefix")
 log_level      = logging_config.get("level")
 
 # -- Misc
-misc_config    = config.get("misc")
-max_epochs     = misc_config.get("max_epochs")
-max_eval_iter  = misc_config.get("max_eval_iter")
-max_eval_retry = misc_config.get("max_eval_retry")
-compiles_model = misc_config.get("compiles_model")
-data_dump_on   = misc_config.get("data_dump_on", False)
-cpu_only       = misc_config.get("cpu_only", False)
+misc_config        = config.get("misc")
+max_epochs         = misc_config.get("max_epochs")
+max_eval_iter      = misc_config.get("max_eval_iter")
+max_eval_retry     = misc_config.get("max_eval_retry")
+compiles_model     = misc_config.get("compiles_model")
+data_dump_on       = misc_config.get("data_dump_on", False)
+cpu_only           = misc_config.get("cpu_only", False)
+peak_flops_per_sec = misc_config.get("peak_flops_per_sec")
 
 # ----------------------------------------------------------------------- #
 #  MISC FEATURES
@@ -676,6 +677,46 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
 def is_last_batch(batch_idx, num_batches):
     return batch_idx + 1 == num_batches
 
+
+def get_num_params(model):
+    return sum(p.numel() for p in model.parameters())
+
+
+def estimate_mfu_per_iteration(model, total_num_tokens_per_iteration, t_detla, peak_flops_per_sec):
+    """
+    Estimate model flops utilization (MFU) in units of peak FLOPS of the GPUs.
+
+    Flops per transformer block per forward pass per token:
+    - num_params    = 12 * token_embd_size**2
+    - num_flops_fwd = 2 * num_params
+
+    Flops per transformer block per fowrwad and backward pass per token:
+    - num_flops_bwd    = 2 * num_flops_fwd
+    - num_flops_fwdbwd = num_flops_fwd + num_flops_bwd
+                       = 3 * num_flops_fwd
+                       = 6 * num_params
+
+    MAE has two transformers: vit encoder and decoder.  The encoder consumes a
+    fraction of the tokens(patches) as compared with the decoder.
+    """
+    # Flops per token
+    num_params_in_encoder_layers = get_num_params(model.model.vit.encoder.layer)
+    num_params_in_decoder_layers = get_num_params(model.model.decoder.decoder_layers)
+
+    num_flops_encoder_per_token = 6 * num_params_in_encoder_layers
+    num_flops_decoder_per_token = 6 * num_params_in_decoder_layers
+
+    # Flops per iteration
+    num_flops_per_iteration = num_flops_encoder_per_token * total_num_tokens_per_iteration * (1 - mask_ratio) + \
+                              num_flops_decoder_per_token * total_num_tokens_per_iteration
+
+    # MFU per iteration
+    num_flops_per_iteration_per_sec = num_flops_per_iteration / t_detla
+    mfu = num_flops_per_iteration_per_sec / peak_flops_per_sec
+
+    return mfu
+
+
 # ----------------------------------------------------------------------- #
 #  TRAINING LOOP
 # ----------------------------------------------------------------------- #
@@ -864,6 +905,9 @@ try:
 
                     # Log the training loop loss after a forward/backward/update
                     if dist_rank == 0:
+                        # MFU
+                        mfu_per_iteration = estimate_mfu_per_iteration(model, total_num_tokens, t_delta, peak_flops_per_sec)
+                        # Misc
                         current_lr    = scheduler.get_lr()
                         seg_start_idx = dataset_train.start_idx
                         seg_end_idx   = dataset_train.end_idx
@@ -873,7 +917,8 @@ try:
                             f"iter {iteration_counter}, "
                             f"lr: {current_lr}, "
                             f"mean train loss: {total_loss:.6f}, "
-                            f"tokens per sec: {tokens_per_sec}"
+                            f"tokens per sec: {tokens_per_sec}, "
+                            f"mfu per iter: {mfu_per_iteration}"
                         )
 
                     # Flush the gradients
