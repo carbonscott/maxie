@@ -726,12 +726,12 @@ preempt_metadata_path = os.environ.get('PREEMPT_METADATA_PATH', None)
 logger.debug(f'[RANK {dist_rank}] Ready for training loop...')
 iteration_counter = 0  # One iteration is one param update after one or a few forward/backward pass
 try:
+    # -- Loop over epochs
     # Only increment starting epoch if current epoch was fully completed
     for epoch in tqdm.tqdm(range(max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
         # Skip epochs up to, but not including the last_epoch
         if epoch < last_epoch: continue
 
-        # -- Train one epoch
         # Reset dataset in a new epoch???
         if not from_resume:
             dataset_train.reset()
@@ -742,12 +742,11 @@ try:
             dataset_train.start_idx = training_state.start_idx
             dataset_train.end_idx   = training_state.end_idx
 
-        # Only increment starting seg idx if still processing current epoch otherwise reset to 0
+        # -- Loop over dataset segments
         for seg in tqdm.tqdm(range(dataset_train.num_seg), desc = f'[RANK {dist_rank}] Segment'):
             # Skip previous segments up to and including the last_seg
             if seg <= last_seg: continue
 
-            # -- Train one segment
             # [PERFORMANCE]
             if dist_local_rank == 0:
                 memmax.start()
@@ -810,6 +809,8 @@ try:
                 if uses_dist:
                     batch_input_shape = broadcast_dict(dict(batch_input_shape = batch_input_shape), src = 0, device = device).get('batch_input_shape')
 
+            # -- Loop over mini batches
+            # --- Set up helper variables for gradient accum and reporting
             # Set up gradient accumulation helper variables
             grad_nosync_counter         = 0
             num_batches                 = len(dataloader)
@@ -823,26 +824,26 @@ try:
             # Set a timer flag
             starts_timer = True
 
-            # -- Loop over mini batches
+            # --- Mini batch loop
             logger.debug(f"[RANK {dist_rank}] Start processing {len(dataloader)} batches at epoch {epoch}, seg {seg}.")
             for batch_idx, batch_data in tqdm.tqdm(
                 enumerate(dataloader),
                 total = num_batches,
                 desc  = f'[RANK {dist_rank}] Mini batch',
-            ):  # (B, C, H, W)
+            ):
                 # Start timer???
                 if starts_timer:
                     t_start = time.monotonic()
                     starts_timer = False
 
-                # -- Train one mini batch
+                # ---- Forward/Backward during an iteration
                 # Create dummy data for a None batch
                 # FIXME: Better data cleaning will eliminate None batch
                 if batch_data is None:
                     logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {batch_idx}.  Creating a dummy input!!!")
                     batch_data = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype, device = device)
 
-                batch_input = batch_data
+                batch_input = batch_data  # (B, C, H, W)
                 batch_input = batch_input.to(device, non_blocking = True)
 
                 # Specify the effective grad accum steps
@@ -875,6 +876,7 @@ try:
 
                 # Conditional parameter updates when grad sync is required
                 if is_grad_sync_required:
+                    # ---- Update neural network parameters
                     # Grad clipping
                     if grad_clip != 0.0:
                         scaler.unscale_(optimizer)
@@ -884,6 +886,7 @@ try:
                     scaler.step(optimizer)
                     scaler.update()
 
+                    # ---- Report the current iteration
                     # Increment the iteration counter after param update
                     iteration_counter += 1
 
@@ -923,6 +926,7 @@ try:
                             f"grad nosync counter: {grad_nosync_counter}"
                         )
 
+                    # ---- Reset for the next iteration
                     # Flush the gradients
                     optimizer.zero_grad(set_to_none = True)
 
@@ -938,13 +942,13 @@ try:
                     # Reset timer flag
                     starts_timer = True
 
-                    # -- Update lr every few seg (X segs = one step/iteration)
+                    # ---- Update lr every few seg (X segs = one step/iteration)
                     if is_action_due(iteration_counter, scheduler_update_iterations):
                         scheduler.step()
                         if dist_rank == 0:
                             logger.info(f"lr is updated to {scheduler.get_lr()}.")
 
-                    # -- Eval and checkpointing
+                    # ---- Eval and checkpointing
                     if is_action_due(iteration_counter, chkpt_saving_iterations):
                         # !!!!!!!!!!!!!!!
                         # !! Data dump !!
@@ -964,8 +968,8 @@ try:
                         if dist_rank == 0:
                             logger.debug(f'[RANK {dist_rank}] Start evaluation...')
 
-                        # -- Eval
-                        # --- Train
+                        # ----- Eval
+                        # ------ Train
                         # Get a random subset of the training set
                         train_loss = torch.tensor(float('nan'))
                         num_eval_retry = 0
@@ -1014,7 +1018,7 @@ try:
                             seg_end_idx   = dataset_eval_train.end_idx
                             logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean train loss = {train_loss:.8f}")
 
-                        # --- Validation
+                        # ------ Validation
                         # Get a random subset of the validation set
                         validate_loss = torch.tensor(float('nan'))
                         num_eval_retry = 0
@@ -1062,7 +1066,7 @@ try:
                             seg_end_idx   = dataset_eval_val.end_idx
                             logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean validation loss = {validate_loss:.8f}")
 
-                        # -- Save checkpoint
+                        # ----- Save checkpoint
                         if validate_loss < loss_min:
                             loss_min = validate_loss
 
@@ -1085,7 +1089,7 @@ try:
                             dist.barrier()
                         logger.debug(f'[RANK {dist_rank}] Done evaluation...')
 
-                    # -- Preemptive checkpointing
+                    # ---- Preemptive checkpointing
                     if preempt_metadata_path is not None and is_action_due(iteration_counter, preempt_chkpt_saving_iterations):
                         # Collect training state
                         training_state.epoch     = epoch
