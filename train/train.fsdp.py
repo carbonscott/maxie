@@ -13,6 +13,7 @@ import argparse
 import inspect
 import logging
 import traceback
+import time
 
 from functools  import partial
 from contextlib import nullcontext
@@ -816,8 +817,8 @@ try:
             start_idx_remainder_batches = num_batches - num_remainder_batches  # e.g. total=102, steps=5, idx = 102 - 102%5 = 100
 
             # Aggregate the loss and number of processed tokens during each gradient accumulation
-            total_loss       = 0.0
-            total_num_tokens = 0
+            total_loss       = torch.tensor(0.0, device = device)
+            total_num_tokens = torch.tensor(0, device = device)
 
             # Set a timer flag
             starts_timer = True
@@ -858,12 +859,12 @@ try:
                         loss = loss / real_grad_accum_steps  # scale the loss to account for gradient accumulation
 
                     # Accumulate loss
-                    total_loss += loss.item()
+                    total_loss += loss.detach()
 
                     # Accumulate number of tokens processed
                     total_numel = batch_data.numel()  # Get number of numeric elements
-                    token_size  = model.config.patch_size**2
-                    num_tokens  = total_numel / token_size
+                    token_size  = model.model.config.patch_size**2
+                    num_tokens  = total_numel // token_size
                     total_num_tokens += num_tokens
 
                     # Backward
@@ -928,10 +929,10 @@ try:
                     grad_nosync_counter = 0
 
                     # Reset the loss accumulator
-                    total_loss = 0.0
+                    total_loss *= 0.0
 
                     # Reset the token accumulator
-                    total_num_tokens = 0
+                    total_num_tokens *= 0
 
                     # Reset timer flag
                     starts_timer = True
