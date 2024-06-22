@@ -919,7 +919,8 @@ try:
                             f"lr: {current_lr}, "
                             f"mean train loss: {total_loss:.6f}, "
                             f"tokens per sec: {tokens_per_sec}, "
-                            f"mfu per iter: {mfu_per_iteration}"
+                            f"mfu per iter: {mfu_per_iteration}, "
+                            f"grad nosync counter: {grad_nosync_counter}"
                         )
 
                     # Flush the gradients
@@ -937,170 +938,172 @@ try:
                     # Reset timer flag
                     starts_timer = True
 
-            # -- Update lr every few seg (X segs = one step/iteration)
-            if is_action_due(iteration_counter, scheduler_update_iterations):
-                scheduler.step()
+                    # -- Update lr every few seg (X segs = one step/iteration)
+                    if is_action_due(iteration_counter, scheduler_update_iterations):
+                        scheduler.step()
+                        if dist_rank == 0:
+                            logger.info(f"lr is updated to {scheduler.get_lr()}.")
 
-            # -- Eval and checkpointing
-            if is_action_due(iteration_counter, chkpt_saving_iterations):
-                # !!!!!!!!!!!!!!!
-                # !! Data dump !!
-                # !!!!!!!!!!!!!!!
-                data_dump_timestamp = {
-                    "uses_dist"       : uses_dist,
-                    "dist_rank"       : dist_rank,
-                    "dist_world_size" : dist_world_size,
-                }
-                if data_dump_on:
-                    data_dump_timestamp.update({
-                        "fl_log_prefix"   : fl_log_prefix,
-                        "epoch"           : epoch,
-                        "seg"             : seg,
-                    })
+                    # -- Eval and checkpointing
+                    if is_action_due(iteration_counter, chkpt_saving_iterations):
+                        # !!!!!!!!!!!!!!!
+                        # !! Data dump !!
+                        # !!!!!!!!!!!!!!!
+                        data_dump_timestamp = {
+                            "uses_dist"       : uses_dist,
+                            "dist_rank"       : dist_rank,
+                            "dist_world_size" : dist_world_size,
+                        }
+                        if data_dump_on:
+                            data_dump_timestamp.update({
+                                "fl_log_prefix"   : fl_log_prefix,
+                                "epoch"           : epoch,
+                                "seg"             : seg,
+                            })
 
-                if dist_rank == 0:
-                    logger.debug(f'[RANK {dist_rank}] Start evaluation...')
+                        if dist_rank == 0:
+                            logger.debug(f'[RANK {dist_rank}] Start evaluation...')
 
-                # -- Eval
-                # --- Train
-                # Get a random subset of the training set
-                train_loss = torch.tensor(float('nan'))
-                num_eval_retry = 0
-                while torch.isnan(train_loss) and (num_eval_retry < max_eval_retry):
-                    dataset_eval_train.reset()
-                    high_seg_idx = dataset_eval_train.total_size - seg_size * dist_world_size
-                    rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
-                    dataset_eval_train.set_start_idx(rand_start_idx)
+                        # -- Eval
+                        # --- Train
+                        # Get a random subset of the training set
+                        train_loss = torch.tensor(float('nan'))
+                        num_eval_retry = 0
+                        while torch.isnan(train_loss) and (num_eval_retry < max_eval_retry):
+                            dataset_eval_train.reset()
+                            high_seg_idx = dataset_eval_train.total_size - seg_size * dist_world_size
+                            rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
+                            dataset_eval_train.set_start_idx(rand_start_idx)
 
-                    sampler_eval = torch.utils.data.DistributedSampler(
-                        dataset_eval_train,
-                        shuffle   = True,
-                        seed      = base_seed,
-                        drop_last = drop_last_in_sampler,
-                    ) if uses_dist else None
-                    dataloader_eval = torch.utils.data.DataLoader(
-                        dataset_eval_train,
-                        batch_size  = batch_size,
-                        sampler     = sampler_eval,
-                        num_workers = num_workers,
-                        shuffle     = False,
-                        collate_fn  = custom_collate,
-                        drop_last   = drop_last_in_loader,
-                    )
+                            sampler_eval = torch.utils.data.DistributedSampler(
+                                dataset_eval_train,
+                                shuffle   = True,
+                                seed      = base_seed,
+                                drop_last = drop_last_in_sampler,
+                            ) if uses_dist else None
+                            dataloader_eval = torch.utils.data.DataLoader(
+                                dataset_eval_train,
+                                batch_size  = batch_size,
+                                sampler     = sampler_eval,
+                                num_workers = num_workers,
+                                shuffle     = False,
+                                collate_fn  = custom_collate,
+                                drop_last   = drop_last_in_loader,
+                            )
 
-                    # Shuffle the training example
-                    if uses_dist:
-                        sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
+                            # Shuffle the training example
+                            if uses_dist:
+                                sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
-                    # Get loss
-                    train_loss = estimate_loss(
-                        dataloader_eval,
-                        model,
-                        autocast_context,
-                        max_iter          = max_eval_iter,
-                        desc              = '(training set)',
-                        device            = device,
-                        dummy_input_shape = batch_input_shape,
-                        **data_dump_timestamp,
-                    )
-                    num_eval_retry += 1
+                            # Get loss
+                            train_loss = estimate_loss(
+                                dataloader_eval,
+                                model,
+                                autocast_context,
+                                max_iter          = max_eval_iter,
+                                desc              = '(training set)',
+                                device            = device,
+                                dummy_input_shape = batch_input_shape,
+                                **data_dump_timestamp,
+                            )
+                            num_eval_retry += 1
 
-                # Log the train loss
-                if dist_rank == 0:
-                    seg_start_idx = dataset_eval_train.start_idx
-                    seg_end_idx   = dataset_eval_train.end_idx
-                    logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean train loss = {train_loss:.8f}")
+                        # Log the train loss
+                        if dist_rank == 0:
+                            seg_start_idx = dataset_eval_train.start_idx
+                            seg_end_idx   = dataset_eval_train.end_idx
+                            logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean train loss = {train_loss:.8f}")
 
-                # --- Validation
-                # Get a random subset of the validation set
-                validate_loss = torch.tensor(float('nan'))
-                num_eval_retry = 0
-                while torch.isnan(validate_loss) and (num_eval_retry < max_eval_retry):
-                    dataset_eval_val.reset()
-                    high_seg_idx = dataset_eval_val.total_size - seg_size * dist_world_size
-                    rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
-                    dataset_eval_val.set_start_idx(rand_start_idx)
+                        # --- Validation
+                        # Get a random subset of the validation set
+                        validate_loss = torch.tensor(float('nan'))
+                        num_eval_retry = 0
+                        while torch.isnan(validate_loss) and (num_eval_retry < max_eval_retry):
+                            dataset_eval_val.reset()
+                            high_seg_idx = dataset_eval_val.total_size - seg_size * dist_world_size
+                            rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
+                            dataset_eval_val.set_start_idx(rand_start_idx)
 
-                    sampler_eval = torch.utils.data.DistributedSampler(
-                        dataset_eval_val,
-                        shuffle   = True,
-                        seed      = base_seed,
-                        drop_last = drop_last_in_sampler,
-                    ) if uses_dist else None
-                    dataloader_eval = torch.utils.data.DataLoader(
-                        dataset_eval_val,
-                        batch_size  = batch_size,
-                        sampler     = sampler_eval,
-                        num_workers = num_workers,
-                        shuffle     = False,
-                        collate_fn  = custom_collate,
-                        drop_last   = drop_last_in_loader,
-                    )
+                            sampler_eval = torch.utils.data.DistributedSampler(
+                                dataset_eval_val,
+                                shuffle   = True,
+                                seed      = base_seed,
+                                drop_last = drop_last_in_sampler,
+                            ) if uses_dist else None
+                            dataloader_eval = torch.utils.data.DataLoader(
+                                dataset_eval_val,
+                                batch_size  = batch_size,
+                                sampler     = sampler_eval,
+                                num_workers = num_workers,
+                                shuffle     = False,
+                                collate_fn  = custom_collate,
+                                drop_last   = drop_last_in_loader,
+                            )
 
-                    # Shuffle the validation example
-                    if uses_dist:
-                        sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
+                            # Shuffle the validation example
+                            if uses_dist:
+                                sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
-                    validate_loss = estimate_loss(
-                        dataloader_eval,
-                        model,
-                        autocast_context,
-                        max_iter          = max_eval_iter,
-                        desc              = '(validation set)',
-                        device            = device,
-                        dummy_input_shape = batch_input_shape,
-                        **data_dump_timestamp,
-                    )
-                    num_eval_retry += 1
+                            validate_loss = estimate_loss(
+                                dataloader_eval,
+                                model,
+                                autocast_context,
+                                max_iter          = max_eval_iter,
+                                desc              = '(validation set)',
+                                device            = device,
+                                dummy_input_shape = batch_input_shape,
+                                **data_dump_timestamp,
+                            )
+                            num_eval_retry += 1
 
-                # Log the validation loss
-                if dist_rank == 0:
-                    seg_start_idx = dataset_eval_val.start_idx
-                    seg_end_idx   = dataset_eval_val.end_idx
-                    logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean validation loss = {validate_loss:.8f}")
+                        # Log the validation loss
+                        if dist_rank == 0:
+                            seg_start_idx = dataset_eval_val.start_idx
+                            seg_end_idx   = dataset_eval_val.end_idx
+                            logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean validation loss = {validate_loss:.8f}")
 
-                # -- Save checkpoint
-                if validate_loss < loss_min:
-                    loss_min = validate_loss
+                        # -- Save checkpoint
+                        if validate_loss < loss_min:
+                            loss_min = validate_loss
 
-                    # Collect training state
-                    training_state.epoch     = epoch
-                    training_state.seg       = seg
-                    training_state.start_idx = dataset_train.start_idx
-                    training_state.end_idx   = dataset_train.end_idx
-                    training_state.loss_min  = loss_min
+                            # Collect training state
+                            training_state.epoch     = epoch
+                            training_state.seg       = seg
+                            training_state.start_idx = dataset_train.start_idx
+                            training_state.end_idx   = dataset_train.end_idx
+                            training_state.loss_min  = loss_min
 
-                    dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
-                    if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
-                    path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
-                    checkpointer.save(model, optimizer, scheduler, training_state, path_chkpt)
-                    logger.info(f"Saving checkpoint at {path_chkpt}.")
+                            dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
+                            if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
+                            path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
+                            checkpointer.save(model, optimizer, scheduler, training_state, path_chkpt)
+                            logger.info(f"Saving checkpoint at {path_chkpt}.")
 
-                # All ranks wait until the end of evaluation by rank 0
-                # [WARNING] Expecting NCCL TIMEOUT ERROR if the evaluation takes too long
-                if dist.is_initialized():
-                    dist.barrier()
-                logger.debug(f'[RANK {dist_rank}] Done evaluation...')
+                        # All ranks wait until the end of evaluation by rank 0
+                        # [WARNING] Expecting NCCL TIMEOUT ERROR if the evaluation takes too long
+                        if dist.is_initialized():
+                            dist.barrier()
+                        logger.debug(f'[RANK {dist_rank}] Done evaluation...')
 
-            # -- Preemptive checkpointing
-            if preempt_metadata_path is not None and is_action_due(iteration_counter, preempt_chkpt_saving_iterations):
-                # Collect training state
-                training_state.epoch     = epoch
-                training_state.seg       = seg
-                training_state.start_idx = dataset_train.start_idx
-                training_state.end_idx   = dataset_train.end_idx
-                training_state.loss_min  = loss_min
+                    # -- Preemptive checkpointing
+                    if preempt_metadata_path is not None and is_action_due(iteration_counter, preempt_chkpt_saving_iterations):
+                        # Collect training state
+                        training_state.epoch     = epoch
+                        training_state.seg       = seg
+                        training_state.start_idx = dataset_train.start_idx
+                        training_state.end_idx   = dataset_train.end_idx
+                        training_state.loss_min  = loss_min
 
-                dir_chkpt = f"{timestamp}.preempt"
-                if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
-                path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
-                checkpointer.save(model, optimizer, scheduler, training_state, path_chkpt)
-                logger.info(f"[RANK {dist_rank}] Saving preemptive checkpoint (epoch {epoch}, end_idx {dataset_train.end_idx}) at {path_chkpt}.")
+                        dir_chkpt = f"{timestamp}.preempt"
+                        if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
+                        path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
+                        checkpointer.save(model, optimizer, scheduler, training_state, path_chkpt)
+                        logger.info(f"[RANK {dist_rank}] Saving preemptive checkpoint (epoch {epoch}, end_idx {dataset_train.end_idx}) at {path_chkpt}.")
 
-                if dist_rank == 0:
-                    with open(preempt_metadata_path, "w") as f:
-                        f.write(path_chkpt)
-                    logger.info(f"[RANK {dist_rank}] Saving preemptive metadata (epoch {epoch}, end_idx {dataset_train.end_idx}) at {preempt_metadata_path}.")
+                        if dist_rank == 0:
+                            with open(preempt_metadata_path, "w") as f:
+                                f.write(path_chkpt)
+                            logger.info(f"[RANK {dist_rank}] Saving preemptive metadata (epoch {epoch}, end_idx {dataset_train.end_idx}) at {preempt_metadata_path}.")
 
             # [PERFORMANCE]
             if dist_local_rank == 0:
