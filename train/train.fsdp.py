@@ -968,8 +968,8 @@ try:
                         if dist_rank == 0:
                             logger.debug(f'[RANK {dist_rank}] Start evaluation...')
 
-                        # ----- Eval
-                        # ------ Train
+                        # ---- - Eval
+                        # ---- -- Train
                         # Get a random subset of the training set
                         train_loss = torch.tensor(float('nan'))
                         num_eval_retry = 0
@@ -1018,7 +1018,7 @@ try:
                             seg_end_idx   = dataset_eval_train.end_idx
                             logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean train loss = {train_loss:.8f}")
 
-                        # ------ Validation
+                        # ---- -- Validation
                         # Get a random subset of the validation set
                         validate_loss = torch.tensor(float('nan'))
                         num_eval_retry = 0
@@ -1066,7 +1066,7 @@ try:
                             seg_end_idx   = dataset_eval_val.end_idx
                             logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean validation loss = {validate_loss:.8f}")
 
-                        # ----- Save checkpoint
+                        # ---- - Save checkpoint
                         if validate_loss < loss_min:
                             loss_min = validate_loss
 
