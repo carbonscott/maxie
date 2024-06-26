@@ -9,9 +9,9 @@ class ActivationMonitor:
     It performs a depth-first search through the model's modules using `named_modules()`.
 
     Key behaviors:
-    1. Monitors all layers if no specific layers are specified.
-    2. Captures both pre-activation (input) and post-activation (output) tensors.
-    3. Includes the root module (entire network) with an empty string key ('').
+    - Monitors all layers if no specific layers are specified.
+    - Captures both pre-activation (input) and post-activation (output) tensors.
+    - Includes the root module (entire network) with an empty string key ('').
 
     The activations dictionary keys correspond to module names:
     - 'layer_name': For specific layers
@@ -71,9 +71,9 @@ class GradientMonitor:
     during the backward pass.  It iterates through the model's parameters using `named_parameters()`.
 
     Key behaviors:
-    1. Monitors gradients of all parameters if no specific layers are specified.
-    2. Uses parameter hooks to capture gradients after they've been computed.
-    3. Stores gradients for each monitored parameter.
+    - Monitors gradients of all parameters if no specific layers are specified.
+    - Uses parameter hooks to capture gradients after they've been computed.
+    - Stores gradients for each monitored parameter.
 
     The gradients dictionary keys correspond to parameter names:
     - 'layer_name.weight': For weight parameters
@@ -146,12 +146,31 @@ def get_param_grad(model, param_name):
     raise ValueError(f"No parameter named '{param_name}' found in the model.")
 
 
-def track_metrics(model, lr, layers_to_monitor = None):
+def monitor_param_metrics(model, lr, params_to_monitor = None):
     """
-    Users need to decide whether to include .weight or .bias.
+    Monitor and compute metrics for specified parameters in the model.
+
+    This function calculates two metrics for each monitored parameter:
+    - Percent parameter update: Order of magnitude of the ratio between the
+      standard deviation of the parameter update and the standard deviation of
+      the parameter itself.
+    - Gradient mean and standard deviation.
+
+    Args:
+        model (nn.Module): The PyTorch model to monitor.
+        lr (float): The learning rate used in optimization.
+        params_to_monitor (list, optional): Specific parameters to monitor. 
+            If None, all parameters with gradients are monitored.
+
+    Note:
+        Users need to specify full parameter names, including '.weight' or '.bias'.
 
     Example:
-        track_metrics(model, lr, ['features.0.weight', 'features.0.bias', 'features.2.weight',])
+        monitor_param_metrics(model, lr, ['features.0.weight', 'features.0.bias', 'features.2.weight'])
+
+    Returns:
+        dict: A dictionary containing metrics for each monitored parameter.
+              Keys are 'percent_param_update' and 'grad_mean_std'.
     """
     metrics = {
         'percent_param_update': {},
@@ -159,7 +178,7 @@ def track_metrics(model, lr, layers_to_monitor = None):
     }
 
     for name, param in model.named_parameters():
-        if layers_to_monitor is not None and name not in layers_to_monitor:
+        if params_to_monitor is not None and name not in params_to_monitor:
             continue
 
         if param.grad is not None:
