@@ -26,18 +26,18 @@ class ActivationMonitor:
 
     Args:
         model (nn.Module): The PyTorch model to monitor.
-        layers_to_monitor (list, optional): Specific layer names to monitor. If None, all layers are monitored.
+        modules_to_monitor (list, optional): Specific modules to monitor. If None, all modules are monitored.
 
     Example:
         monitor = ActivationMonitor(model)
         output = model(input_data)
         activations = monitor.activations
     """
-    def __init__(self, model, layers_to_monitor = None):
-        self.model             = model
-        self.layers_to_monitor = layers_to_monitor
-        self.activations       = {}
-        self.hooks             = []
+    def __init__(self, model, modules_to_monitor = None):
+        self.model              = model
+        self.modules_to_monitor = modules_to_monitor
+        self.activations        = {}
+        self.hooks              = []
 
         self.add_hooks()
 
@@ -52,7 +52,7 @@ class ActivationMonitor:
 
     def add_hooks(self):
         for name, module in self.model.named_modules():
-            if self.layers_to_monitor is None or name in self.layers_to_monitor:
+            if self.modules_to_monitor is None or name in self.modules_to_monitor:
                 getattr(module, 'remove_hooks', lambda : None)()
                 hook = module.register_forward_hook(self.hook_fn(name))
                 self.hooks.append(hook)  # For clean-up
@@ -84,7 +84,7 @@ class GradientMonitor:
 
     Args:
         model (nn.Module): The PyTorch model to monitor.
-        layers_to_monitor (list, optional): Specific layer names to monitor. If None, all parameters are monitored.
+        params_to_monitor (list, optional): Specific parameters to monitor. If None, all parameters are monitored.
                                             Partial matches are allowed (e.g., 'conv' will match 'conv1', 'conv2', etc.)
 
     Attributes:
@@ -102,9 +102,9 @@ class GradientMonitor:
     - Gradients are cloned and moved to CPU to avoid interfering with the original computation.
     - Hooks should be removed (using remove_hooks()) when no longer needed to free up memory.
     """
-    def __init__(self, model, layers_to_monitor = None):
+    def __init__(self, model, params_to_monitor = None):
         self.model             = model
-        self.layers_to_monitor = set(layers_to_monitor) if layers_to_monitor is not None else None
+        self.params_to_monitor = set(params_to_monitor) if params_to_monitor is not None else None
         self.gradients         = {}
         self.hooks             = []
 
@@ -118,7 +118,7 @@ class GradientMonitor:
 
     def add_hooks(self):
         for name, param in self.model.named_parameters():
-            if self.layers_to_monitor is None or any(layer in name for layer in self.layers_to_monitor):
+            if self.params_to_monitor is None or any(layer in name for layer in self.params_to_monitor):
                 getattr(param, 'remove_hooks', lambda : None)()
                 hook = param.register_hook(self.hook_fn(name))
                 self.hooks.append(hook)
