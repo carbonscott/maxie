@@ -2,7 +2,37 @@
 #  Monitoring classes
 # -----------------------------------------------------------------------
 class ActivationMonitor:
-    """ Forward hook is used """
+    """
+    A class for monitoring activations in PyTorch neural network modules.
+
+    This class uses forward hooks to capture input and output tensors of specified layers.
+    It performs a depth-first search through the model's modules using `named_modules()`.
+
+    Key behaviors:
+    1. Monitors all layers if no specific layers are specified.
+    2. Captures both pre-activation (input) and post-activation (output) tensors.
+    3. Includes the root module (entire network) with an empty string key ('').
+
+    The activations dictionary keys correspond to module names:
+    - 'layer_name': For specific layers
+    - 'container_name': For container modules like nn.Sequential, nn.ModuleList, nn.ModuleDict
+    - '': For the root module (entire network)
+
+    Each activation entry contains:
+    - 'pre': Input tensor to the module
+    - 'pos': Output tensor from the module
+
+    Note: The root module ('') provides the overall network input and final output.
+
+    Args:
+        model (nn.Module): The PyTorch model to monitor.
+        layers_to_monitor (list, optional): Specific layer names to monitor. If None, all layers are monitored.
+
+    Example:
+        monitor = ActivationMonitor(model)
+        output = model(input_data)
+        activations = monitor.activations
+    """
     def __init__(self, model, layers_to_monitor = None):
         self.model             = model
         self.layers_to_monitor = layers_to_monitor
@@ -34,7 +64,44 @@ class ActivationMonitor:
 
 
 class GradientMonitor:
-    """ Backward hook (more specifically, param hook) is used """
+    """
+    A class for monitoring gradients in PyTorch neural network parameters.
+
+    This class uses backward hooks to capture gradient tensors of specified parameters
+    during the backward pass.  It iterates through the model's parameters using `named_parameters()`.
+
+    Key behaviors:
+    1. Monitors gradients of all parameters if no specific layers are specified.
+    2. Uses parameter hooks to capture gradients after they've been computed.
+    3. Stores gradients for each monitored parameter.
+
+    The gradients dictionary keys correspond to parameter names:
+    - 'layer_name.weight': For weight parameters
+    - 'layer_name.bias': For bias parameters
+
+    Note: Unlike ActivationMonitor, there's no root module concept here. Only individual
+    parameter gradients are captured.
+
+    Args:
+        model (nn.Module): The PyTorch model to monitor.
+        layers_to_monitor (list, optional): Specific layer names to monitor. If None, all parameters are monitored.
+                                            Partial matches are allowed (e.g., 'conv' will match 'conv1', 'conv2', etc.)
+
+    Attributes:
+        gradients (dict): A dictionary storing the gradients of monitored parameters.
+                          Keys are parameter names, values are gradient tensors.
+
+    Example:
+        monitor = GradientMonitor(model)
+        output = model(input_data)
+        loss = criterion(output, target)
+        loss.backward()
+        gradients = monitor.gradients
+
+    Note:
+    - Gradients are cloned and moved to CPU to avoid interfering with the original computation.
+    - Hooks should be removed (using remove_hooks()) when no longer needed to free up memory.
+    """
     def __init__(self, model, layers_to_monitor = None):
         self.model             = model
         self.layers_to_monitor = set(layers_to_monitor) if layers_to_monitor is not None else None
