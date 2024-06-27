@@ -76,6 +76,12 @@ def main(cfg: DictConfig):
     dir_preempt  = 'preempt'
     file_preempt = f'{cfg.job}.dat'
     path_preempt = os.path.join(dir_preempt, file_preempt)
+    if cfg.skip_preempt:
+        try:
+            os.remove(path_preempt)
+            print(f"Preemptive checkpoint ignored.  Removed existing checkpoint file: '{path_preempt}'")
+        except Exception as e:
+            print(f"An error occurred while trying to remove the file: {e}.  It might have been removed already.")
     if os.path.exists(path_preempt):
         if cfg.train_config.checkpoint.path_chkpt_prev is not None:
             try:

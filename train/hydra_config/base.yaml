@@ -5,6 +5,7 @@ defaults:
 
 auto_submit: false
 job: my_job
+skip_preempt: false
 
 path:
   dir_bsub_template  : 'hydra_config/bsub_config'

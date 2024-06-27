@@ -911,20 +911,27 @@ try:
                     if dist_rank == 0:
                         # MFU
                         mfu_per_iteration = estimate_mfu_per_iteration(model, total_num_tokens, t_delta, peak_flops_per_sec)
+
                         # Misc
-                        current_lr    = scheduler.get_lr()
+                        current_lrs   = scheduler.get_lr()
                         seg_start_idx = dataset_train.start_idx
                         seg_end_idx   = dataset_train.end_idx
-                        logger.info(
-                            f"[RANK {dist_rank}] LOSS:TRAIN - "
-                            f"seg {seg_start_idx}-{seg_end_idx}, "
-                            f"iter {iteration_counter}, "
-                            f"lr: {current_lr}, "
-                            f"mean train loss: {total_loss:.6f}, "
-                            f"tokens per sec: {tokens_per_sec}, "
-                            f"mfu per iter: {mfu_per_iteration}, "
-                            f"grad nosync counter: {grad_nosync_counter}"
-                        )
+
+                        # Log
+                        log_data = {
+                            "rank"               : dist_rank,
+                            "event"              : "LOSS:TRAIN",
+                            "iteration"          : iteration_counter,
+                            "segment"            : f"{seg_start_idx}-{seg_end_idx}",
+                            "learning_rate"      : ",".join(f"{lr:.4e}" for lr in current_lrs),
+                            "grad_norm"          : f"{grad_norm:.6f}",
+                            "mean_train_loss"    : f"{total_loss:.6f}",
+                            "tokens_per_sec"     : f"{tokens_per_sec:.1e}",
+                            "mfu_per_iteration"  : f"{mfu_per_iteration:.3f}",
+                            "grad_nosync_counter": grad_nosync_counter,
+                        }
+                        log_msg = " | ".join([f"{k}={v}" for k, v in log_data.items()])
+                        logger.info(log_msg)
 
                     # ---- Reset for the next iteration
                     # Flush the gradients
@@ -946,7 +953,9 @@ try:
                     if is_action_due(iteration_counter, scheduler_update_iterations):
                         scheduler.step()
                         if dist_rank == 0:
-                            logger.info(f"lr is updated to {scheduler.get_lr()}.")
+                            current_lrs = scheduler.get_lr()
+                            current_lrs_msg = ",".join(f"{lr:.4e}" for lr in current_lrs
+                            logger.info(f"lr is updated to {current_lrs_msg}.")
 
                     # ---- Eval and checkpointing
                     if is_action_due(iteration_counter, chkpt_saving_iterations):
