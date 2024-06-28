@@ -63,9 +63,27 @@ misc:
   data_dump_on        : false
   peak_flops_per_sec  : !!float 112e12
 model:
-  name: 'facebook/vit-mae-base'
-  mask_ratio: 0.75
-  from_scratch: false
+  hf_config:
+    hidden_size                 : 768
+    num_hidden_layers           : 12
+    num_attention_heads         : 12
+    intermediate_size           : 3072
+    hidden_act                  : "gelu"
+    hidden_dropout_prob         : 0.0
+    attention_probs_dropout_prob: 0.0
+    initializer_range           : 0.02
+    layer_norm_eps              : 1.0e-12
+    image_size                  : 224
+    patch_size                  : 16
+    num_channels                : 1
+    qkv_bias                    : true
+    decoder_num_attention_heads : 16
+    decoder_hidden_size         : 512
+    decoder_num_hidden_layers   : 8
+    decoder_intermediate_size   : 2048
+    mask_ratio                  : 0.75
+    norm_pix_loss               : false
+  from_scratch                : false
 optim:
   grad_clip   : 1.0
   lr          : !!float 1.5e-4
