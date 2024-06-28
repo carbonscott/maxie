@@ -26,6 +26,10 @@ from maxie.datasets.ipc_segmented_dataset_dist import (
     IPCDatasetConfig,
     IPCDataset,
 )
+from maxie.modeling.adapted_mae import (
+    AdaptedViTMAEForPreTrainingConfig,
+    AdaptedViTMAEForPreTraining,
+)
 from maxie.utils.seed        import set_seed
 from maxie.utils.misc        import is_action_due
 from maxie.utils.checkpoint  import CheckpointConfig, Checkpoint
@@ -49,15 +53,6 @@ from maxie.utils_fsdp import (
     FullStateDictCheckpoint,
     broadcast_dict,
     init_logger,
-)
-
-# -- Import model from huggingface
-from transformers.models.vit_mae.configuration_vit_mae import ViTMAEConfig
-from transformers.models.vit_mae.modeling_vit_mae import (
-    ViTMAEForPreTraining,
-    ViTMAEPreTrainedModel,  # Monkey patch the _init_weights
-    ViTMAEModel,  # Monkey patch the _init_weights
-    ViTMAEDecoder,  # Monkey patch the init
 )
 
 # -- Torch specific imports
@@ -161,9 +156,10 @@ detector_norm_params = transforms_config.get("norm")
 sampling_fraction    = transforms_config.get("sampling_fraction", None)
 
 # -- Model
-model_params    = config.get("model")
-from_scratch    = model_params.get("from_scratch")
-hf_model_config = model_params.get("hf_config")
+model_params = config.get("model")
+model_name   = model_params.get("name")
+mask_ratio   = model_params.get("mask_ratio")
+from_scratch = model_params.get("from_scratch")
 
 # -- Loss
 loss_config      = config.get("loss")
@@ -387,57 +383,14 @@ def custom_collate(batch):
 #  MODEL
 # ----------------------------------------------------------------------- #
 logger.debug(f'[RANK {dist_rank}] Configuring model...')
-# -- Monkey patch the _init_weights for encoder to account for the accumulation ofresidual paths
-# --- Encoder
-def _init_weights_in_encoder(self, module):
-    """Initialize the weights"""
-    if isinstance(module, (nn.Linear, nn.Conv2d)):
-        # Normalize the init std by the number of residual paths
-        std  = self.config.initializer_range
-        std *= (2 * self.config.num_hidden_layers)**-0.5  # 1/sqrt(num_residual_layers), cf: GPT-2 paper
-
-        # Slightly different from the TF version which uses truncated_normal for initialization
-        # cf https://github.com/pytorch/pytorch/pull/5617
-        module.weight.data.normal_(mean=0.0, std=std)
-        if module.bias is not None:
-            module.bias.data.zero_()
-    elif isinstance(module, nn.LayerNorm):
-        module.bias.data.zero_()
-        module.weight.data.fill_(1.0)
-ViTMAEModel._init_weights = _init_weights_in_encoder
-
-# --- Decoder
-# HF's MAE doesn't have a _init_weights for decoder, but it initializes the
-# decoder in the end through the _init_weights from ViTMAEPreTrainedModel
-def _init_weights_in_decoder(self, module):
-    """Initialize the weights"""
-    if isinstance(module, (nn.Linear, nn.Conv2d)):
-        # Normalize the init std by the number of residual paths
-        std  = self.config.initializer_range
-        std *= (2 * self.config.decoder_num_hidden_layers)**-0.5  # 1/sqrt(num_residual_layers), cf: GPT-2 paper
-
-        # Slightly different from the TF version which uses truncated_normal for initialization
-        # cf https://github.com/pytorch/pytorch/pull/5617
-        module.weight.data.normal_(mean=0.0, std=std)
-        if module.bias is not None:
-            module.bias.data.zero_()
-    elif isinstance(module, nn.LayerNorm):
-        module.bias.data.zero_()
-        module.weight.data.fill_(1.0)
-ViTMAEPreTrainedModel._init_weights = _init_weights_in_decoder
-
 # -- Config the model
-model_config = ViTMAEConfig(**hf_model_config)
-model = ViTMAEForPreTraining(model_config)
+model_config = AdaptedViTMAEForPreTrainingConfig(
+    model_name   = model_name,
+    mask_ratio   = mask_ratio,
+    from_scratch = from_scratch,
+)
+model = AdaptedViTMAEForPreTraining(model_config)
 if not uses_dist: model.to(device)
-
-# Report the init
-if dist_rank == 0:
-    for name, module in model.named_modules():
-        if isinstance(module, (nn.Linear, nn.Conv2d)):
-            mean = module.weight.data.mean()
-            std  = module.weight.data.std()
-            logger.info(f"logevent='INIT' | rank={dist_rank} | module={name} | mean={mean:.6f} | std={std:.6f}")
 
 # !! Make all params trainable, a workaround for pytorch 2.0.1
 torch_version = torch.__version__
@@ -748,14 +701,14 @@ def estimate_mfu_per_iteration(model, total_num_tokens_per_iteration, t_detla, p
     fraction of the tokens(patches) as compared with the decoder.
     """
     # Flops per token
-    num_params_in_encoder_layers = get_num_params(model.vit.encoder.layer)
-    num_params_in_decoder_layers = get_num_params(model.decoder.decoder_layers)
+    num_params_in_encoder_layers = get_num_params(model.model.vit.encoder.layer)
+    num_params_in_decoder_layers = get_num_params(model.model.decoder.decoder_layers)
 
     num_flops_encoder_per_token = 6 * num_params_in_encoder_layers
     num_flops_decoder_per_token = 6 * num_params_in_decoder_layers
 
     # Flops per iteration
-    num_flops_per_iteration = num_flops_encoder_per_token * total_num_tokens_per_iteration * (1 - model.config.mask_ratio) + \
+    num_flops_per_iteration = num_flops_encoder_per_token * total_num_tokens_per_iteration * (1 - mask_ratio) + \
                               num_flops_decoder_per_token * total_num_tokens_per_iteration
 
     # MFU per iteration
@@ -911,7 +864,7 @@ try:
 
                     # Accumulate number of tokens processed
                     total_numel = batch_data.numel()  # Get number of numeric elements
-                    token_size  = model.config.patch_size**2
+                    token_size  = model.model.config.patch_size**2
                     num_tokens  = total_numel // token_size
                     total_num_tokens += num_tokens
 
@@ -967,10 +920,10 @@ try:
                         # Log
                         log_data = {
                             "rank"               : dist_rank,
-                            "logevent"           : "LOSS:TRAIN",
+                            "event"              : "LOSS:TRAIN",
                             "iteration"          : iteration_counter,
                             "segment"            : f"{seg_start_idx}-{seg_end_idx}",
-                            "learning_rate"      : ",".join(f"{lr}" for lr in current_lrs),
+                            "learning_rate"      : ",".join(f"{lr:.4e}" for lr in current_lrs),
                             "grad_norm"          : f"{grad_norm:.6f}",
                             "mean_train_loss"    : f"{total_loss:.6f}",
                             "tokens_per_sec"     : f"{tokens_per_sec:.1e}",
@@ -1001,7 +954,7 @@ try:
                         scheduler.step()
                         if dist_rank == 0:
                             current_lrs = scheduler.get_lr()
-                            current_lrs_msg = ",".join(f"{lr}" for lr in current_lrs)
+                            current_lrs_msg = ",".join(f"{lr:.4e}" for lr in current_lrs
                             logger.info(f"lr is updated to {current_lrs_msg}.")
 
                     # ---- Eval and checkpointing
