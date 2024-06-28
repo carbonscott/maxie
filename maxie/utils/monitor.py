@@ -34,7 +34,7 @@ class ActivationMonitor:
         activations = monitor.activations
     """
     def __init__(self, model, modules_to_monitor = None):
-        self.model              = model
+        self.model              = getattr(model, 'module', model)  # Use sharded if it exists
         self.modules_to_monitor = modules_to_monitor
         self.activations        = {}
         self.hooks              = []
@@ -103,7 +103,7 @@ class GradientMonitor:
     - Hooks should be removed (using remove_hooks()) when no longer needed to free up memory.
     """
     def __init__(self, model, params_to_monitor = None):
-        self.model             = model
+        self.model             = getattr(model, 'module', model)  # Use sharded if it exists
         self.params_to_monitor = set(params_to_monitor) if params_to_monitor is not None else None
         self.gradients         = {}
         self.hooks             = []
@@ -177,7 +177,8 @@ def monitor_param_metrics(model, lr, params_to_monitor = None):
         'grad_mean_std': {}
     }
 
-    for name, param in model.named_parameters():
+    model_by_rank = getattr(model, 'module', model)
+    for name, param in model_by_rank.named_parameters():
         if params_to_monitor is not None and name not in params_to_monitor:
             continue
 
