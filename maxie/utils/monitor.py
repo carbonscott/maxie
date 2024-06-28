@@ -39,8 +39,6 @@ class ActivationMonitor:
         self.activations        = {}
         self.hooks              = []
 
-        self.add_hooks()
-
     def hook_fn(self, name):
         """ Closure to parameterize a function: f(params)(input) """
         def hook(module, input, output):
@@ -107,8 +105,6 @@ class GradientMonitor:
         self.params_to_monitor = set(params_to_monitor) if params_to_monitor is not None else None
         self.gradients         = {}
         self.hooks             = []
-
-        self.add_hooks()
 
     def hook_fn(self, name):
         def hook(grad):
