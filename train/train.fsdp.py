@@ -1003,17 +1003,17 @@ try:
                     if monitors_dynamics:
                         # Monitor preactivation and activation of the nonlinearity
                         for name, act in act_monitor.activations.items():
-                            preact = act.get('pre')
-                            act    = act.get('pos')
+                            mean_preact, std_preact = act.get('pre')
+                            mean_act, std_act       = act.get('pos')
                             log_data = {
                                 "rank"        : dist_rank,
                                 "iteration"   : iteration_counter,
                                 "logevent"    : "DYNAMICS:ACT",
                                 "name"        : name,
-                                "preact.mean" : preact.mean(),
-                                "preact.std"  : preact.std(),
-                                "act.mean"    : act.mean(),
-                                "act.std"     : act.std(),
+                                "preact.mean" : mean_preact,
+                                "preact.std"  : std_preact,
+                                "act.mean"    : mean_act,
+                                "act.std"     : std_act,
                             }
                             log_msg = " | ".join([f"{k}={v}" for k, v in log_data.items()])
                             logger.info(log_msg)

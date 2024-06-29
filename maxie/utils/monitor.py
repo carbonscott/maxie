@@ -42,9 +42,11 @@ class ActivationMonitor:
     def hook_fn(self, name):
         """ Closure to parameterize a function: f(params)(input) """
         def hook(module, input, output):
+            input_tensor  = input[0].detach()  # For some reasons, it's always a tuple
+            output_tensor = output.detach()
             self.activations[name] = {
-                'pre' : input[0].detach().cpu(),  # For some reasons, it's always a tuple
-                'pos' : output.detach().cpu(),
+                'pre' : (input_tensor.mean().item() , input_tensor.std().item()),
+                'pos' : (output_tensor.mean().item(), output_tensor.std().item()),
             }
         return hook
 
