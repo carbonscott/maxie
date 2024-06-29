@@ -62,6 +62,7 @@ misc:
   compiles_model      : false
   data_dump_on        : false
   peak_flops_per_sec  : !!float 112e12
+  monitors_dynamics   : false
 model:
   hf_config:
     hidden_size                 : 768

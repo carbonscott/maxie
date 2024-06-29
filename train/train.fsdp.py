@@ -50,6 +50,10 @@ from maxie.utils_fsdp import (
     broadcast_dict,
     init_logger,
 )
+from maxie.utils.monitor import (
+    ActivationMonitor,
+    monitor_param_update_metrics,
+)
 
 # -- Import model from huggingface
 from transformers.models.vit_mae.configuration_vit_mae import ViTMAEConfig
@@ -59,6 +63,8 @@ from transformers.models.vit_mae.modeling_vit_mae import (
     ViTMAEModel,  # Monkey patch the _init_weights
     ViTMAEDecoder,  # Monkey patch the init
 )
+# -- Imports for monitoring training dynamics
+from transformers.activations import ACT2CLS
 
 # -- Torch specific imports
 import torch
@@ -207,6 +213,7 @@ compiles_model     = misc_config.get("compiles_model")
 data_dump_on       = misc_config.get("data_dump_on", False)
 cpu_only           = misc_config.get("cpu_only", False)
 peak_flops_per_sec = misc_config.get("peak_flops_per_sec")
+monitors_dynamics  = misc_config.get("monitors_dynamics")
 
 # ----------------------------------------------------------------------- #
 #  MISC FEATURES
@@ -387,7 +394,8 @@ def custom_collate(batch):
 #  MODEL
 # ----------------------------------------------------------------------- #
 logger.debug(f'[RANK {dist_rank}] Configuring model...')
-# -- Monkey patch the _init_weights for encoder to account for the accumulation ofresidual paths
+# -- Monkey patch the _init_weights
+# Account for the (pre)activation spread due to the accumulation of residual paths
 # --- Encoder
 def _init_weights_in_encoder(self, module):
     """Initialize the weights"""
@@ -505,7 +513,9 @@ if uses_dist:
         device_id         = device,
     )
 
-    sharded_param_count = sum(p.numel() for p in model.module.parameters())
+    sharded_param_count = sum(p.numel() for p in model.parameters())  # .module will return the raw model view when use_orig_params = True
+                                                                      # making it effectively reporting the sharded param count.  Removing
+                                                                      # .module makes it more consistent regardles of use_orig_params.
     logger.debug(f"RANK {dist_rank} - sharded parameter count: {sharded_param_count*1e-6} M.")
 
     dist.barrier()
@@ -584,6 +594,14 @@ if from_resume:
         logger.info(f"Loading from checkpoint -- {path_chkpt_prev}.")
         logger.info(f"PREV - last_epoch {last_epoch}, last_seg {training_state.start_idx}-{training_state.end_idx}, loss_min = {loss_min}")
 
+
+# ----------------------------------------------------------------------- #
+#  Monitoring training dynamics
+# ----------------------------------------------------------------------- #
+if monitors_dynamics:
+    modules_to_monitor = (ACT2CLS[model.config.hidden_act], )
+    act_monitor = ActivationMonitor(model, modules_to_monitor)
+    act_monitor.add_hooks()
 
 # ----------------------------------------------------------------------- #
 #  HELPER
@@ -980,6 +998,51 @@ try:
                         log_msg = " | ".join([f"{k}={v}" for k, v in log_data.items()])
                         logger.info(log_msg)
 
+                    # ---- Monitor training dynamics
+                    # Do it before zero-ing gradients
+                    if monitors_dynamics:
+                        # Monitor preactivation and activation of the nonlinearity
+                        for name, act in act_monitor.activations.items():
+                            preact = act.get('pre')
+                            act    = act.get('pos')
+                            log_data = {
+                                "rank"        : dist_rank,
+                                "iteration"   : iteration_counter,
+                                "logevent"    : "DYNAMICS:ACT",
+                                "name"        : name,
+                                "preact.mean" : preact.mean(),
+                                "preact.std"  : preact.std(),
+                                "act.mean"    : act.mean(),
+                                "act.std"     : act.std(),
+                            }
+                            log_msg = " | ".join([f"{k}={v}" for k, v in log_data.items()])
+                            logger.info(log_msg)
+
+                        # Monitor param update
+                        current_lr = scheduler.get_lr()[0]  # It's a list
+                        encoder_param_monitor = monitor_param_update_metrics(model.vit.encoder, current_lr)  # Motifs like transformer blocks
+                        decoder_param_monitor = monitor_param_update_metrics(model.decoder.decoder_layers, current_lr)
+
+                        for k, v in encoder_param_monitor.get('percent_param_update').items():
+                            log_data = {
+                                "rank"                : dist_rank,
+                                "iteration"           : iteration_counter,
+                                "logevent"            : "DYNAMICS:PARAMS",
+                                f"encoder_update:{k}" : v,
+                            }
+                            log_msg = " | ".join([f"{k}={v}" for k, v in log_data.items()])
+                            logger.info(log_msg)
+
+                        for k, v in decoder_param_monitor.get('percent_param_update').items():
+                            log_data = {
+                                "rank"                : dist_rank,
+                                "iteration"           : iteration_counter,
+                                "logevent"            : "DYNAMICS:PARAMS",
+                                f"decoder_update:{k}" : v,
+                            }
+                            log_msg = " | ".join([f"{k}={v}" for k, v in log_data.items()])
+                            logger.info(log_msg)
+
                     # ---- Reset for the next iteration
                     # Flush the gradients
                     optimizer.zero_grad(set_to_none = True)
@@ -1182,6 +1245,10 @@ except Exception as e:
     tb = traceback.format_exc()
     logger.error(f"[RANK {dist_rank}] Error occurred: {e}\nTraceback: {tb}")
 finally:
+    # Clean up hooks
+    if monitors_dynamics:
+        act_monitor.remove_hooks()
+
     # Ensure that the process group is always destroyed
     if dist.is_initialized():
         dist.barrier()

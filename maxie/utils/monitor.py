@@ -50,7 +50,7 @@ class ActivationMonitor:
 
     def add_hooks(self):
         for name, module in self.model.named_modules():
-            if self.modules_to_monitor is None or name in self.modules_to_monitor:
+            if self.modules_to_monitor is None or isinstance(module, self.modules_to_monitor):
                 getattr(module, 'remove_hooks', lambda : None)()
                 hook = module.register_forward_hook(self.hook_fn(name))
                 self.hooks.append(hook)  # For clean-up
@@ -90,7 +90,7 @@ class GradientMonitor:
                           Keys are parameter names, values are gradient tensors.
 
     Example:
-        monitor = GradientMonitor(model)
+        monitor = GradientMonitor(model.vit.encoder)  # You can pass in the entire model or just a sub-module
         output = model(input_data)
         loss = criterion(output, target)
         loss.backward()
@@ -142,7 +142,7 @@ def get_param_grad(model, param_name):
     raise ValueError(f"No parameter named '{param_name}' found in the model.")
 
 
-def monitor_param_metrics(model, lr, params_to_monitor = None):
+def monitor_param_update_metrics(model, lr, params_to_monitor = None):
     """
     Monitor and compute metrics for specified parameters in the model.
 
@@ -191,3 +191,56 @@ def monitor_param_metrics(model, lr, params_to_monitor = None):
             )
 
     return metrics
+
+
+def create_param_update_monitor(model, lr, weights_only = True):
+    """
+    Create a closure (currying) for monitoring parameter update metrics.
+
+    This function calculates two metrics for each monitored parameter:
+    - Percent parameter update: Order of magnitude of the ratio between the
+      standard deviation of the parameter update and the standard deviation of
+      the parameter itself.
+    - Gradient mean and standard deviation.
+
+    Args:
+        model (nn.Module): The PyTorch model or sub-module to monitor.
+        lr (float): The learning rate used in optimization.
+        weights_only (bool, optional): Monitor weights only.  Defaults to True.
+
+    Returns:
+        function: A closure that when called, returns the monitored metrics.
+
+    Note:
+        Users need to specify full parameter names, including '.weight' or '.bias'.
+
+    Example:
+        monitor = create_param_update_monitor(model, lr)
+        results = monitor()
+    """
+    def monitor():
+        metrics = {
+            'percent_param_update': {},
+            'grad_mean_std': {}
+        }
+        for name, param in model.named_parameters():
+            # Conditionally skip biases
+            if weights_only and '.bias' in name:
+                continue
+
+            if param.grad is not None:
+                # Percent param update
+                metrics['percent_param_update'][name] = (
+                    (param.grad * lr).std().cpu() /
+                    param.detach().std().cpu()
+                ).log10().item()
+
+                # Mean and Std of gradients
+                metrics['grad_mean_std'][name] = (
+                    param.grad.mean().cpu().item(),
+                    param.grad.std().cpu().item()
+                )
+
+        return metrics
+
+    return monitor
