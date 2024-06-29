@@ -1025,20 +1025,24 @@ try:
 
                         for k, v in encoder_param_monitor.get('percent_param_update').items():
                             log_data = {
-                                "rank"                : dist_rank,
-                                "iteration"           : iteration_counter,
-                                "logevent"            : "DYNAMICS:PARAMS",
-                                f"encoder_update:{k}" : v,
+                                "rank"      : dist_rank,
+                                "iteration" : iteration_counter,
+                                "logevent"  : "DYNAMICS:PARAMS",
+                                "type"      : "encoder",
+                                "name"      : k,
+                                "update"    : v,
                             }
                             log_msg = " | ".join([f"{k}={v}" for k, v in log_data.items()])
                             logger.info(log_msg)
 
                         for k, v in decoder_param_monitor.get('percent_param_update').items():
                             log_data = {
-                                "rank"                : dist_rank,
-                                "iteration"           : iteration_counter,
-                                "logevent"            : "DYNAMICS:PARAMS",
-                                f"decoder_update:{k}" : v,
+                                "rank"      : dist_rank,
+                                "iteration" : iteration_counter,
+                                "logevent"  : "DYNAMICS:PARAMS",
+                                "type"      : "decoder",
+                                "name"      : k,
+                                "update"    : v,
                             }
                             log_msg = " | ".join([f"{k}={v}" for k, v in log_data.items()])
                             logger.info(log_msg)
