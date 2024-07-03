@@ -312,6 +312,20 @@ backward_prefetch = BackwardPrefetch.BACKWARD_PRE
 
 
 # ----------------------------------------------------------------------- #
+#  TF32 support
+# ----------------------------------------------------------------------- #
+# Ampere architecture (capability_major = 8) is required.
+if device != 'cpu':
+    capability_major, capability_minor = torch.cuda.get_device_capability(device)
+    if capability_major >= 8:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+        if dist_rank == 0:
+            logger.info("[RANK {dist_rank}] TF32 enabled on matmul and cuDNN operations.")
+
+
+# ----------------------------------------------------------------------- #
 #  LOGGING
 # ----------------------------------------------------------------------- #
 # Fetch the current timestamp...
