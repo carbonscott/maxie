@@ -12,52 +12,35 @@ colorama.init(autoreset=True)
 # -- Imports for FSDP
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
-# -- Imports for saving full state dict
-from torch.distributed.fsdp import (
-    FullStateDictConfig,
-    StateDictType,
-)
-
 # -- Imports for saving sharded state dict
-try:
-    # Use new API
-    from torch.distributed.checkpoint import (
-        FileSystemReader,
-        FileSystemWriter,
-        load,
-        save,
-        DefaultLoadPlanner,
-        DefaultSavePlanner,
-        load_sharded_optimizer_state_dict,
-    )
-except ImportError:
-    # Fall back to the old API
-    from torch.distributed._shard.checkpoint import (
-        FileSystemReader,
-        FileSystemWriter,
-        load_state_dict,
-        save_state_dict,
-    )
-    from torch.distributed.checkpoint.default_planner import (
-        DefaultLoadPlanner,
-        DefaultSavePlanner,
-    )
-    from torch.distributed.checkpoint.optimizer import load_sharded_optimizer_state_dict
-
-    import warnings
-    warnings.warn("Using older version of the FSDP checkpoint API.", DeprecationWarning)
+# Use old APIs
+from torch.distributed._shard.checkpoint import (
+    FileSystemReader,
+    FileSystemWriter,
+    load_state_dict,
+    save_state_dict,
+)
+from torch.distributed.checkpoint.default_planner import (
+    DefaultLoadPlanner,
+    DefaultSavePlanner,
+)
+from torch.distributed.checkpoint.optimizer import load_sharded_optimizer_state_dict
 
 from torch.distributed.fsdp.api import (
-    ShardedOptimStateDictConfig,
+    StateDictType,
+    FullStateDictConfig,
+    FullOptimStateDictConfig,
     ShardedStateDictConfig,
+    ShardedOptimStateDictConfig,
 )
 
 # -- Imports for understanding package versions
 from pkg_resources import packaging
+from packaging import version
 
 # -- Imports for dataclasses
 from dataclasses import dataclass, asdict
-from typing import Optional
+from typing import Optional, Dict
 
 # -- Rest
 import pickle
@@ -292,557 +275,422 @@ def broadcast_dict(obj, src=0, device = 'cpu'):
 # ----------------------------------------------------------------------- #
 #  CHECKPOINT
 # ----------------------------------------------------------------------- #
-@dataclass
-class TrainingStateDictConfig:
-    epoch      : int
-    seg        : int
-    start_idx  : int
-    end_idx    : int
-    loss_min   : float
-
-
 # -- 1. FULL STATE DICT
-@dataclass
-class FullStateDictCheckpointConfig:
-    model          : Optional[nn.Module]    # A FSDP wrapped model on all ranks
-    optimizer      : Optional[torch.optim.Optimizer]
-    lr_scheduler   : Optional[torch.optim.lr_scheduler._LRScheduler]
-    training_state : Optional[TrainingStateDictConfig]
-    rank           : int
-    device         : str
-    path_checkpoint: Optional[str]
-
 class FullStateDictCheckpoint:
-    def __init__(self, config):
-        self.config = config
-        self.full_state_dict = None
+    MODEL_STATE_DICT_FILE = 'model_full_state_dict.pt'
+    OPTIM_STATE_DICT_FILE = 'optim_full_state_dict.pt'
+    LR_STATE_DICT_FILE    = 'lr_full_state_dict.pt'
+    ITER_STATE_DICT_FILE  = 'iter_full_state_dict.pt'
 
-
-    @staticmethod
-    def contains_fsdp(module):
-        return hasattr(module, 'module')
-
-
-    def _prepare_model_full_state_dict(self):
-        model = self.config.model    # A FSDP wrapped model on all ranks
-
-        # Sanity check if the model is wrapped with FSDP
-        if not FullStateDictCheckpoint.contains_fsdp(model):
-            raise ValueError(f"RANK {self.config.rank} - The model subject to "  \
-            "checkpointing must be wrapped with an FSDP wrapper before saving a "\
-            "full state dict.")
-
-        state_dict = None
-
-        # Configure full state dict saving...
-        full_state_saving_policy = FullStateDictConfig(
+    def __init__(self):
+        self.state_dict_config = FullStateDictConfig(
+            offload_to_cpu = True,
+            rank0_only     = True,
+        )
+        self.optim_dict_config = FullOptimStateDictConfig(
             offload_to_cpu = True,
             rank0_only     = True,
         )
 
-        # Pull full state dict from the sharded model...
-        with FSDP.state_dict_type(
-            model,
-            state_dict_type  =StateDictType.FULL_STATE_DICT,
-            state_dict_config=full_state_saving_policy,
-        ):
-            state_dict = model.state_dict()
-
-        return state_dict
-
-
-    def _prepare_optim_full_state_dict(self):
-        model     = self.config.model
-        optimizer = self.config.optimizer
-
-        # Sanity check if the model is wrapped with FSDP
-        if not FullStateDictCheckpoint.contains_fsdp(model):
-            raise ValueError(f"RANK {self.config.rank} - The model subject to "  \
-            "checkpointing must be wrapped with an FSDP wrapper before saving a "\
-            "full state dict.")
-
-        state_dict = None
-
-        # Configure full state dict saving...
-        full_state_saving_policy = FullStateDictConfig(
-            offload_to_cpu = True,
-            rank0_only     = True,
-        )
+    def save_model_checkpoint(self, rank, model, path_checkpoint_model):
+        state_dict_config = self.state_dict_config
+        optim_dict_config = self.optim_dict_config
 
         # Pull full state dict from the sharded model...
         with FSDP.state_dict_type(
             model,
-            state_dict_type  =StateDictType.FULL_STATE_DICT,
-            state_dict_config=full_state_saving_policy,
+            StateDictType.FULL_STATE_DICT,
+            state_dict_config       = state_dict_config,
+            optim_state_dict_config = optim_dict_config,
         ):
-            state_dict = FSDP.full_optim_state_dict(model, optimizer)
+            model_state_dict = model.state_dict()
 
-        return state_dict
+            if rank == 0:
+                torch.save(model_state_dict, path_checkpoint_model)
 
-
-    def _prepare_lr_scheduler_state_dict_by_rank0(self):
-        rank = self.config.rank
-        lr_scheduler_state_dict = None
-
-        if rank == 0:
-            lr_scheduler = self.config.lr_scheduler
-            lr_scheduler_state_dict = lr_scheduler.state_dict()
-
-        return lr_scheduler_state_dict
-
-
-    def _prepare_training_state_dict_by_rank0(self):
-        rank = self.config.rank
-        training_state = None
-        if rank == 0:
-            training_state = self.config.training_state
-            training_state = asdict(training_state)
-
-        return training_state
-
-
-    def _load_model_full_state_dict(self):
+    def load_model_checkpoint(self, rank, model, path_checkpoint_model):
         """
         Must run before FSDP wrapper.
         """
-        rank            = self.config.rank
-        path_checkpoint = self.config.path_checkpoint
-        model           = self.config.model
+        dist.barrier()
 
-        # Sanity check if the model is wrapped with FSDP
-        if FullStateDictCheckpoint.contains_fsdp(model):
-            raise ValueError(f"RANK {self.config.rank} - The model subject to "  \
-            "checkpointing with full state dict must be resumed before the FSDP "\
-            "wrapper.")
+        state_dict_config = self.state_dict_config
+        optim_dict_config = self.optim_dict_config
 
-        if rank == 0:
-            if self.full_state_dict is None:
-                self.full_state_dict = torch.load(path_checkpoint, map_location = 'cpu')
-            model_full_state_dict = self.full_state_dict.get('model_state_dict')
-            model.load_state_dict(model_full_state_dict)
+        model_state_dict = torch.load(path_checkpoint_model)
 
-
-    def _load_optim_full_state_dict(self):
-        """
-        Must run after FSDP wrapper.
-        """
-        rank            = self.config.rank
-        device          = self.config.device
-        path_checkpoint = self.config.path_checkpoint
-        optimizer       = self.config.optimizer
-        model           = self.config.model
-
-        optim_full_state_dict = None
-        if rank == 0:
-            if self.full_state_dict is None:
-                self.full_state_dict = torch.load(path_checkpoint, map_location = 'cpu')
-            optim_full_state_dict = self.full_state_dict.get('optim_state_dict')
-
-        optim_full_state_dict = broadcast_dict(optim_full_state_dict, src = 0, device = device)
-
-        flattened_optim_state_dict = FSDP.optim_state_dict_to_load(
-            model = model, optim = optimizer, optim_state_dict = optim_full_state_dict
+        # [NOTE] Context manager will throw errors
+        FSDP.set_state_dict_type(
+            model,
+            StateDictType.FULL_STATE_DICT,
+            state_dict_config       = state_dict_config,
+            optim_state_dict_config = optim_dict_config,
         )
-        optimizer.load_state_dict(flattened_optim_state_dict)
+        model.load_state_dict(model_state_dict)
 
+    def load_optimizer_checkpoint(self, rank, model, optimizer, path_checkpoint_optim):
+        dist.barrier()
 
-    def _load_training_state_dict(self):
-        rank            = self.config.rank
-        device          = self.config.device
-        training_state  = self.config.training_state
-        path_checkpoint = self.config.path_checkpoint
+        state_dict_config = self.state_dict_config
+        optim_dict_config = self.optim_dict_config
 
-        training_state = None
-        if rank == 0:
-            if self.full_state_dict is None:
-                self.full_state_dict = torch.load(path_checkpoint, map_location = 'cpu')
-            training_state = self.full_state_dict.get('training_state_dict')
+        full_optim_state_dict = None
 
-        # Scatter the training state to all ranks...
-        training_state = broadcast_dict(training_state, src = 0, device = device)
+        if rank == 0 or not optim_dict_config.rank0_only:
+            full_optim_state_dict = torch.load(path_checkpoint_optim)
 
-        self.config.training_state = TrainingStateDictConfig(**training_state)
+        sharded_optim_state_dict = FSDP.scatter_full_optim_state_dict(
+            full_optim_state_dict = full_optim_state_dict,
+            model = model,
+        )
+        optimizer.load_state_dict(sharded_optim_state_dict)
 
+    def save_optimizer_checkpoint(self, rank, model, optimizer, path_checkpoint_optim):
+        state_dict_config = self.state_dict_config
+        optim_dict_config = self.optim_dict_config
 
-    def _load_lr_scheduler_state_dict(self):
-        rank         = self.config.rank
-        device       = self.config.device
-        lr_scheduler = self.config.lr_scheduler
-        path_checkpoint = self.config.path_checkpoint
-
-        lr_scheduler_state_dict = None
-        if rank == 0:
-            if self.full_state_dict is None:
-                self.full_state_dict = torch.load(path_checkpoint, map_location = 'cpu')
-            lr_scheduler_state_dict = self.full_state_dict.get('scheduler_state_dict')
-
-        # Scatter the training state to all ranks...
-        lr_scheduler_state_dict = broadcast_dict(lr_scheduler_state_dict, src = 0, device = device)
-
-        self.config.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
-
-
-    def save(self, model, optimizer, lr_scheduler, training_state, path_checkpoint):
-        if dist.is_initialized():
-            dist.barrier()    # Make sure all shards are at the same timepoint in training.
-
-        self.update_config(model, optimizer, lr_scheduler, training_state, path_checkpoint)
-
-        rank = self.config.rank
-
-        model_full_state_dict   = self._prepare_model_full_state_dict()
-        optim_full_state_dict   = self._prepare_optim_full_state_dict()
-        lr_scheduler_state_dict = self._prepare_lr_scheduler_state_dict_by_rank0()
-        training_state_dict     = self._prepare_training_state_dict_by_rank0()
+        torch_version = torch.__version__
+        torch_version = torch_version[:torch_version.find("+") if "+" in torch_version else None]
+        if version.parse(torch_version) <= version.parse("2.0.1"):
+            optim_state_dict = FSDP.full_optim_state_dict(model, optimizer)
+        else:
+            with FSDP.state_dict_type(
+                model,
+                StateDictType.FULL_STATE_DICT,
+                state_dict_config       = state_dict_config,
+                optim_state_dict_config = optim_dict_config,
+            ):
+                optim_state_dict = FSDP.optim_state_dict(model, optimizer)
 
         if rank == 0:
-            path_checkpoint = self.config.path_checkpoint
-            full_state_dict = {
-                'model_state_dict'     : model_full_state_dict,
-                'optim_state_dict'     : optim_full_state_dict,
-                'scheduler_state_dict' : lr_scheduler_state_dict,
-                'training_state_dict'  : training_state_dict,
-            }
-            torch.save(full_state_dict, path_checkpoint)
+            torch.save(optim_state_dict, path_checkpoint_optim)
 
-        if dist.is_initialized():
-            dist.barrier()
+    def load_optimizer_checkpoint(self, rank, model, optimizer, path_checkpoint_optim):
+        dist.barrier()
 
+        state_dict_config = self.state_dict_config
+        optim_dict_config = self.optim_dict_config
 
-    def update_config(self, model = None, optimizer = None, lr_scheduler = None, training_state = None, path_checkpoint = None):
+        torch_version = torch.__version__
+        torch_version = torch_version[:torch_version.find("+") if "+" in torch_version else None]
+        if version.parse(torch_version) <= version.parse("2.0.1"):
+            full_optim_state_dict = None
+
+            if rank == 0 or not optim_dict_config.rank0_only:
+                full_optim_state_dict = torch.load(path_checkpoint_optim)
+
+            sharded_optim_state_dict = FSDP.scatter_full_optim_state_dict(
+                full_optim_state_dict = full_optim_state_dict,
+                model = model,
+            )
+            optimizer.load_state_dict(sharded_optim_state_dict)
+        else:
+            # [NOTE] Context manager will throw errors
+            FSDP.set_state_dict_type(
+                model,
+                StateDictType.FULL_STATE_DICT,
+                state_dict_config       = state_dict_config,
+                optim_state_dict_config = optim_dict_config,
+            )
+            full_optim_state_dict = None
+
+            if rank == 0 or not optim_dict_config.rank0_only:
+                full_optim_state_dict = torch.load(path_checkpoint_optim)
+
+            flattened_optim_state_dict = FSDP.optim_state_dict_to_load(
+                model = model,
+                optim = optimizer,
+                optim_state_dict = full_optim_state_dict,
+            )
+            optimizer.load_state_dict(flattened_optim_state_dict)
+
+    def save_lr_checkpoint(self, rank, lr_scheduler, path_checkpoint_lr):
+        if rank == 0:
+            lr_state_dict = lr_scheduler.state_dict()
+            torch.save(lr_state_dict, path_checkpoint_lr)
+
+    def load_lr_checkpoint(self, rank, lr_scheduler, path_checkpoint_lr):
+        dist.barrier()
+
+        object_list = [None, ]  # For the use of dist.broadcast_object_list
+        if rank == 0:
+            lr_state_dict = torch.load(path_checkpoint_lr, map_location = 'cpu')
+            object_list = [lr_state_dict, ]
+
+        dist.broadcast_object_list(object_list, src = 0)
+        lr_state_dict = object_list[0]
+        lr_scheduler.load_state_dict(lr_state_dict)
+
+    def save_iter_state_checkpoint(self, rank, iter_state, path_checkpoint_iter_state):
+        if rank == 0:
+            torch.save(iter_state, path_checkpoint_iter_state)
+
+    def load_iter_state_checkpoint(self, rank, iter_state, path_checkpoint_iter_state):
+        dist.barrier()
+
+        object_list = [None, ]  # For the use of dist.broadcast_object_list
+        if rank == 0:
+            iter_state_saved = torch.load(path_checkpoint_iter_state, map_location = 'cpu')
+            object_list = [iter_state_saved, ]
+
+        dist.broadcast_object_list(object_list, src = 0)
+        iter_state_saved = object_list[0]
+        iter_state = iter_state_saved
+
+    def save(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
+        os.makedirs(path_checkpoint, exist_ok = True)
+        path_checkpoint_model      = os.path.join(path_checkpoint, self.MODEL_STATE_DICT_FILE)
+        path_checkpoint_optim      = os.path.join(path_checkpoint, self.OPTIM_STATE_DICT_FILE)
+        path_checkpoint_lr         = os.path.join(path_checkpoint, self.LR_STATE_DICT_FILE)
+        path_checkpoint_iter_state = os.path.join(path_checkpoint, self.ITER_STATE_DICT_FILE)
+
         if model is not None:
-            self.config.model = model
-            print(f"RANK {self.config.rank} - Model loaded.")
+            self.save_model_checkpoint(rank, model, path_checkpoint_model)
 
         if optimizer is not None:
-            self.config.optimizer = optimizer
-            print(f"RANK {self.config.rank} - Optimizer loaded.")
+            self.save_optimizer_checkpoint(rank, model, optimizer, path_checkpoint_optim)
 
         if lr_scheduler is not None:
-            self.config.lr_scheduler = lr_scheduler
-            print(f"RANK {self.config.rank} - Scheduler loaded.")
+            self.save_lr_checkpoint(rank, lr_scheduler, path_checkpoint_lr)
 
-        if training_state is not None:
-            self.config.training_state = training_state
-            print(f"RANK {self.config.rank} - Training state loaded.")
+        if iter_state is not None:
+            self.save_iter_state_checkpoint(rank, iter_state, path_checkpoint_iter_state)
 
-        if path_checkpoint is not None:
-            self.config.path_checkpoint = path_checkpoint
-            print(f"RANK {self.config.rank} - Checkpoint path loaded.")
-
-
-    def pre_fsdp_load(self):
+    def pre_fsdp_load(self, rank, model, path_checkpoint):
         """
         Only the model needs to be loaded pre FSDP wrapper.
         """
-        self._load_model_full_state_dict()
-        if dist.is_initialized():
-            dist.barrier()    # Make sure all shards are at the same timepoint in training.
+        path_checkpoint_model = os.path.join(path_checkpoint, self.MODEL_STATE_DICT_FILE)
+        self.load_model_checkpoint(rank, model, path_checkpoint_model)
 
+        dist.barrier()
 
-    def post_fsdp_load(self, model, optimizer, lr_scheduler, training_state):
+    def post_fsdp_load(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
         """
         Users have to pass in the current model, optimizer, lr_scheduler and
         training state so that the checkpointer has the best knowledge of the
         FSDP stages.
         """
+        path_checkpoint_optim      = os.path.join(path_checkpoint, self.OPTIM_STATE_DICT_FILE)
+        path_checkpoint_lr         = os.path.join(path_checkpoint, self.LR_STATE_DICT_FILE)
+        path_checkpoint_iter_state = os.path.join(path_checkpoint, self.ITER_STATE_DICT_FILE)
 
-        self.update_config(model, optimizer, lr_scheduler, training_state)
+        if optimizer is not None:
+            self.load_optimizer_checkpoint(rank, model, optimizer, path_checkpoint_optim)
 
-        self._load_optim_full_state_dict()
-        self._load_training_state_dict()
-        self._load_lr_scheduler_state_dict()
+        if lr_scheduler is not None:
+            self.load_lr_checkpoint(rank, lr_scheduler, path_checkpoint_lr)
 
-        if dist.is_initialized():
-            dist.barrier()    # Make sure all shards are at the same timepoint in training.
+        if iter_state is not None:
+            self.load_iter_state_checkpoint(rank, iter_state, path_checkpoint_iter_state)
+
+        dist.barrier()
+
+    def load(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
+        path_checkpoint_model      = os.path.join(path_checkpoint, self.MODEL_STATE_DICT_FILE)
+        path_checkpoint_optim      = os.path.join(path_checkpoint, self.OPTIM_STATE_DICT_FILE)
+        path_checkpoint_lr         = os.path.join(path_checkpoint, self.LR_STATE_DICT_FILE)
+        path_checkpoint_iter_state = os.path.join(path_checkpoint, self.ITER_STATE_DICT_FILE)
+
+        if model is not None:
+            self.load_model_checkpoint(rank, model, path_checkpoint_model)
+
+        if optimizer is not None:
+            self.load_optimizer_checkpoint(rank, model, optimizer, path_checkpoint_optim)
+
+        if lr_scheduler is not None:
+            self.load_lr_checkpoint(rank, lr_scheduler, path_checkpoint_lr)
+
+        if iter_state is not None:
+            self.load_iter_state_checkpoint(rank, iter_state, path_checkpoint_iter_state)
 
 
 # -- 2. SHARDED STATE DICT
-@dataclass
-class ShardedStateDictCheckpointConfig:
-    model          : Optional[nn.Module]    # A FSDP wrapped model on all ranks
-    optimizer      : Optional[torch.optim.Optimizer]
-    lr_scheduler   : Optional[torch.optim.lr_scheduler._LRScheduler]
-    training_state : TrainingStateDictConfig
-    rank           : int
-    device         : str
-    path_checkpoint: Optional[str]    # Path to a previously saved checkpoint directory
-
 class ShardedStateDictCheckpoint:
-    def __init__(self, config):
-        self.config = config
+    MODEL_STATE_DICT_FILE = 'model_full_state_dict.pt'
+    OPTIM_STATE_DICT_FILE = 'optim_full_state_dict.pt'
+    LR_STATE_DICT_FILE    = 'lr_full_state_dict.pt'
+    ITER_STATE_DICT_FILE  = 'iter_full_state_dict.pt'
 
-        patch_build_metadata()
-
-
-    @staticmethod
-    def contains_fsdp(module):
-        return hasattr(module, 'module')
-
-
-    def _prepare_model_state_dict(self):
-        model = self.config.model
-
-        # Sanity check if the model is wrapped with FSDP
-        if not ShardedStateDictCheckpoint.contains_fsdp(model):
-            raise ValueError(f"RANK {self.config.rank} - The model subject to "  \
-            "checkpointing must be wrapped with an FSDP wrapper before saving a "\
-            "full state dict.")
-
-        # Pulling sharded state dict
-        model_state_dict = None
-        with FSDP.state_dict_type(
-            model,
-            state_dict_type        = StateDictType.SHARDED_STATE_DICT,
-            state_dict_config      =ShardedStateDictConfig(offload_to_cpu=True),
-            optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
-        ):
-            model_state_dict = model.state_dict()
-
-        return model_state_dict
-
-
-    def _prepare_optim_state_dict(self):
-        optimizer = self.config.optimizer
-        model     = self.config.model
-
-        # Pulling sharded state dict
-        optim_state_dict = None
-        with FSDP.state_dict_type(
-            model,
-            state_dict_type        = StateDictType.SHARDED_STATE_DICT,
-            state_dict_config      =ShardedStateDictConfig(offload_to_cpu=True),
-            optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
-        ):
-            # Refer to https://github.com/wz337/pytorch/blob/a0429c01ad665ffb2faa04a411913ecee9962566/test/distributed/checkpoint/test_fsdp_optim_state.py#L77C26-L77C42
-            optim_state_dict = FSDP.optim_state_dict(model, optimizer)
-
-        return optim_state_dict
-
-
-    def _prepare_model_and_optimizer_state_dict(self):
-        model     = self.config.model
-        optimizer = self.config.optimizer
-
-        # Sanity check if the model is wrapped with FSDP
-        if not ShardedStateDictCheckpoint.contains_fsdp(model):
-            raise ValueError(f"RANK {self.config.rank} - The model subject to "  \
-            "checkpointing must be wrapped with an FSDP wrapper before saving a "\
-            "full state dict.")
-
-        # Pulling sharded state dict
-        # Refer to https://github.com/pytorch/pytorch/blob/697ed6f5b3484a09410af075c34419e94fa42592/test/distributed/checkpoint/test_fsdp_optim_state.py#L73
-        state_dict = None
-        with FSDP.state_dict_type(
-            model,
-            state_dict_type        = StateDictType.SHARDED_STATE_DICT,
-            state_dict_config      =ShardedStateDictConfig(offload_to_cpu=True),
-            optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
-        ):
-            state_dict = dict(
-                model_state_dict = model.state_dict(),
-                optim_state_dict = FSDP.optim_state_dict(model, optimizer),
-            )
-
-        return state_dict
-
-
-    def _save_model_and_optimizer(self):
-        # Prepare the state_dict
-        model_state_dict = self._prepare_model_state_dict()
-        optim_state_dict = self._prepare_optim_state_dict()
-
-        state_dict = dict(
-            model_state_dict = model_state_dict,
-            optim_state_dict = optim_state_dict,
+    def __init__(self):
+        self.state_dict_config = ShardedStateDictConfig(
+            offload_to_cpu = True,
+        )
+        self.optim_dict_config = ShardedOptimStateDictConfig(
+            offload_to_cpu = True,
         )
 
-        # Create a directory for saving checkpoints
-        device = self.config.device
-        path_checkpoint = self.config.path_checkpoint
-        ## path_checkpoint = broadcast_dict(dict(path_checkpoint=path_checkpoint), src = 0, device = device).get('path_checkpoint')
-        os.makedirs(path_checkpoint, exist_ok=True)
+    def save_model_checkpoint(self, rank, model, path_checkpoint_model):
+        state_dict_config = self.state_dict_config
+        optim_dict_config = self.optim_dict_config
 
-        # Write the state_dict to a checkpoint directory
-        model = self.config.model
-        writer = FileSystemWriter(path_checkpoint, single_file_per_rank=True)
-        if state_dict is not None:
-            save_state_dict(
-                state_dict     = state_dict,
-                storage_writer = writer,
-                process_group  = model.process_group,
-                planner        = DefaultSavePlanner(),
-            )
-
-
-    def _load_model_and_optimizer(self):
-        model           = self.config.model
-        optimizer       = self.config.optimizer
-        path_checkpoint = self.config.path_checkpoint
-
-        # -- Model
-        # Sanity check if the model is wrapped with FSDP
-        if not ShardedStateDictCheckpoint.contains_fsdp(model):
-            raise ValueError(f"RANK {self.config.rank} - The model subject to "  \
-            "checkpointing must be wrapped with an FSDP wrapper before saving a "\
-            "full state dict.")
-
-        with FSDP.state_dict_type(
+        dist_writer = FileSystemWriter(path_checkpoint_model)
+        FSDP.set_state_dict_type(
             model,
-            state_dict_type        = StateDictType.SHARDED_STATE_DICT,
-            state_dict_config      =ShardedStateDictConfig(offload_to_cpu=True),
-            optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
-        ):
-            state_dict = dict(model_state_dict = model.state_dict())
-            load_state_dict(
-                state_dict     = state_dict,
-                storage_reader = FileSystemReader(path_checkpoint),
-                planner        = DefaultLoadPlanner(),
-            )
-            model.load_state_dict(state_dict.get('model_state_dict'))
-            ## model.to(self.config.rank)
+            StateDictType.SHARDED_STATE_DICT,
+            state_dict_config       = state_dict_config,
+            optim_state_dict_config = optim_dict_config,
+        )
+        model_state_dict = model.state_dict()
+        state_dict_to_save = {"model": model_state_dict}  # FSDP writer requires it.
 
-        # -- Optimizer
-        if optimizer is None:
-            raise ValueError("Optimizer has not been properly initialized")
+        save_state_dict(
+            state_dict     = state_dict_to_save,
+            storage_writer = dist_writer,
+            planner        = DefaultSavePlanner(),
+        )
 
-        with FSDP.state_dict_type(
+    def load_model_checkpoint(self, rank, model, path_checkpoint_model):
+        """
+        Must run before FSDP wrapper.
+        """
+        dist.barrier()
+
+        state_dict_config = self.state_dict_config
+        optim_dict_config = self.optim_dict_config
+
+        dist_reader = FileSystemReader(path_checkpoint_model)
+        FSDP.set_state_dict_type(
             model,
-            state_dict_type        = StateDictType.SHARDED_STATE_DICT,
-            state_dict_config      =ShardedStateDictConfig(offload_to_cpu=True),
-            optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=True),
-        ):
-            optim_state = load_sharded_optimizer_state_dict(
-                model_state_dict = state_dict.get('model_state_dict'),
-                optimizer_key    = 'optim_state_dict',
-                storage_reader   = FileSystemReader(path_checkpoint),
-            )
+            StateDictType.SHARDED_STATE_DICT,
+            state_dict_config       = state_dict_config,
+            optim_state_dict_config = optim_dict_config,
+        )
+        model_state_dict = model.state_dict()
+        state_dict_to_load = {"model": model_state_dict}  # FSDP reader requires it.
+
+        load_state_dict(
+            state_dict     = state_dict_to_load,
+            storage_reader = dist_reader,
+            planner        = DefaultLoadPlanner(),
+        )
+        model_state_dict = state_dict_to_load.get("model")
+        model.load_state_dict(model_state_dict)
+
+    def save_optimizer_checkpoint(self, rank, model, optimizer, path_checkpoint_optim):
+        state_dict_config = self.state_dict_config
+        optim_dict_config = self.optim_dict_config
+
+        dist_writer = FileSystemWriter(path_checkpoint_optim)
+        FSDP.set_state_dict_type(
+            model,
+            StateDictType.SHARDED_STATE_DICT,
+            state_dict_config       = state_dict_config,
+            optim_state_dict_config = optim_dict_config,
+        )
+        optim_state_dict = FSDP.optim_state_dict(model, optimizer)
+        state_dict_to_save = {"optim": optim_state_dict}  # FSDP writer requires it.
+
+        save_state_dict(
+            state_dict     = state_dict_to_save,
+            storage_writer = dist_writer,
+            planner        = DefaultSavePlanner(),
+        )
+
+
+    def load_optimizer_checkpoint(self, rank, model, optimizer, path_checkpoint_optim):
+        dist.barrier()
+
+        state_dict_config = self.state_dict_config
+        optim_dict_config = self.optim_dict_config
+
+        dist_reader = FileSystemReader(path_checkpoint_optim)
+        FSDP.set_state_dict_type(
+            model,
+            StateDictType.SHARDED_STATE_DICT,
+            state_dict_config       = state_dict_config,
+            optim_state_dict_config = optim_dict_config,
+        )
+        model_state_dict = model.state_dict()
+        state_dict_to_load = load_sharded_optimizer_state_dict(
+            model_state_dict = model_state_dict,
+            optimizer_key    = 'optim',
+            storage_reader   = dist_reader,
+        )
+        optim_state_dict = state_dict_to_load.get("optim")
+
         flattened_optim_state_dict = FSDP.optim_state_dict_to_load(
-            model = model, optim = optimizer, optim_state_dict = optim_state.get('optim_state_dict')
+            model = model,
+            optim = optimizer,
+            optim_state_dict = optim_state_dict,
         )
         optimizer.load_state_dict(flattened_optim_state_dict)
 
-
-    def _prepare_lr_scheduler_state_dict_by_rank0(self):
-        rank = self.config.rank
-        lr_scheduler_state_dict = None
-
+    def save_lr_checkpoint(self, rank, lr_scheduler, path_checkpoint_lr):
         if rank == 0:
-            lr_scheduler = self.config.lr_scheduler
-            lr_scheduler_state_dict = lr_scheduler.state_dict()
+            lr_state_dict = lr_scheduler.state_dict()
+            torch.save(lr_state_dict, path_checkpoint_lr)
 
-        return lr_scheduler_state_dict
+    def load_lr_checkpoint(self, rank, lr_scheduler, path_checkpoint_lr):
+        dist.barrier()
 
-
-    def _prepare_training_state_dict_by_rank0(self):
-        rank = self.config.rank
-        training_state = None
+        object_list = [None, ]  # For the use of dist.broadcast_object_list
         if rank == 0:
-            training_state = self.config.training_state
-            training_state = asdict(training_state)
+            lr_state_dict = torch.load(path_checkpoint_lr, map_location = 'cpu')
+            object_list = [lr_state_dict, ]
 
-        return training_state
+        dist.broadcast_object_list(object_list, src = 0)
+        lr_state_dict = object_list[0]
+        lr_scheduler.load_state_dict(lr_state_dict)
 
-
-    def _load_training_state_dict(self):
-        rank            = self.config.rank
-        device          = self.config.device
-        training_state  = self.config.training_state
-        path_checkpoint = self.config.path_checkpoint
-
-        training_state = None
+    def save_iter_state_checkpoint(self, rank, iter_state, path_checkpoint_iter_state):
         if rank == 0:
-            path_scheduler_and_training_checkpoint = os.path.join(path_checkpoint, 'scheduler_and_training.chkpt')
-            full_state_dict = torch.load(path_scheduler_and_training_checkpoint, map_location = 'cpu')
-            training_state = full_state_dict.get('training_state_dict')
+            torch.save(iter_state, path_checkpoint_iter_state)
 
-        # Scatter the training state to all ranks...
-        training_state = broadcast_dict(training_state, src = 0, device = device)
+    def load_iter_state_checkpoint(self, rank, iter_state, path_checkpoint_iter_state):
+        dist.barrier()
 
-        self.config.training_state = TrainingStateDictConfig(**training_state)
-
-
-    def _load_lr_scheduler_state_dict(self):
-        rank         = self.config.rank
-        device       = self.config.device
-        lr_scheduler = self.config.lr_scheduler
-        path_checkpoint = self.config.path_checkpoint
-
-        lr_scheduler_state_dict = None
+        object_list = [None, ]  # For the use of dist.broadcast_object_list
         if rank == 0:
-            path_scheduler_and_training_checkpoint = os.path.join(path_checkpoint, 'scheduler_and_training.chkpt')
-            full_state_dict = torch.load(path_scheduler_and_training_checkpoint, map_location = 'cpu')
-            lr_scheduler_state_dict = full_state_dict.get('scheduler_state_dict')
+            iter_state_saved = torch.load(path_checkpoint_iter_state, map_location = 'cpu')
+            object_list = [iter_state_saved, ]
 
-        # Scatter the training state to all ranks...
-        lr_scheduler_state_dict = broadcast_dict(lr_scheduler_state_dict, src = 0, device = device)
+        dist.broadcast_object_list(object_list, src = 0)
+        iter_state_saved = object_list[0]
+        iter_state = iter_state_saved
 
-        self.config.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
+    def save(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
+        os.makedirs(path_checkpoint, exist_ok = True)
+        path_checkpoint_model      = os.path.join(path_checkpoint, self.MODEL_STATE_DICT_FILE)
+        path_checkpoint_optim      = os.path.join(path_checkpoint, self.OPTIM_STATE_DICT_FILE)
+        path_checkpoint_lr         = os.path.join(path_checkpoint, self.LR_STATE_DICT_FILE)
+        path_checkpoint_iter_state = os.path.join(path_checkpoint, self.ITER_STATE_DICT_FILE)
 
-
-    def update_config(self, model = None, optimizer = None, lr_scheduler = None, training_state = None, path_checkpoint = None):
         if model is not None:
-            self.config.model = model
-            print(f"RANK {self.config.rank} - Model loaded.")
+            self.save_model_checkpoint(rank, model, path_checkpoint_model)
 
         if optimizer is not None:
-            self.config.optimizer = optimizer
-            print(f"RANK {self.config.rank} - Optimizer loaded.")
+            self.save_optimizer_checkpoint(rank, model, optimizer, path_checkpoint_optim)
 
         if lr_scheduler is not None:
-            self.config.lr_scheduler = lr_scheduler
-            print(f"RANK {self.config.rank} - Scheduler loaded.")
+            self.save_lr_checkpoint(rank, lr_scheduler, path_checkpoint_lr)
 
-        if training_state is not None:
-            self.config.training_state = training_state
-            print(f"RANK {self.config.rank} - Training state loaded.")
+        if iter_state is not None:
+            self.save_iter_state_checkpoint(rank, iter_state, path_checkpoint_iter_state)
 
-        if path_checkpoint is not None:
-            self.config.path_checkpoint = path_checkpoint
-            print(f"RANK {self.config.rank} - Checkpoint path loaded.")
+    def load(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
+        path_checkpoint_model      = os.path.join(path_checkpoint, self.MODEL_STATE_DICT_FILE)
+        path_checkpoint_optim      = os.path.join(path_checkpoint, self.OPTIM_STATE_DICT_FILE)
+        path_checkpoint_lr         = os.path.join(path_checkpoint, self.LR_STATE_DICT_FILE)
+        path_checkpoint_iter_state = os.path.join(path_checkpoint, self.ITER_STATE_DICT_FILE)
 
-        if dist.is_initialized():
-            dist.barrier()
+        if model is not None:
+            self.load_model_checkpoint(rank, model, path_checkpoint_model)
 
+        if optimizer is not None:
+            self.load_optimizer_checkpoint(rank, model, optimizer, path_checkpoint_optim)
 
-    def save(self, model, optimizer, lr_scheduler, training_state, path_checkpoint):
-        if dist.is_initialized():
-            dist.barrier()
+        if lr_scheduler is not None:
+            self.load_lr_checkpoint(rank, lr_scheduler, path_checkpoint_lr)
 
-        self.update_config(model, optimizer, lr_scheduler, training_state, path_checkpoint)
+        if iter_state is not None:
+            self.load_iter_state_checkpoint(rank, iter_state, path_checkpoint_iter_state)
 
-        # -- Model and Optimizer
-        self._save_model_and_optimizer()
+    def pre_fsdp_load(self, rank, model, path_checkpoint):
+        pass
 
-        # -- Scheduler and training state (rank0 only)
-        lr_scheduler_state_dict = self._prepare_lr_scheduler_state_dict_by_rank0()
-        training_state_dict     = self._prepare_training_state_dict_by_rank0()
-
-        rank = self.config.rank
-        if rank == 0:
-            path_checkpoint = self.config.path_checkpoint
-            path_scheduler_and_training_checkpoint = os.path.join(path_checkpoint, 'scheduler_and_training.chkpt')
-            full_state_dict = {
-                'scheduler_state_dict' : lr_scheduler_state_dict,
-                'training_state_dict'  : training_state_dict,
-            }
-            torch.save(full_state_dict, path_scheduler_and_training_checkpoint)
-
-        if dist.is_initialized():
-            dist.barrier()
-
-
-    def load(self):
-        # -- Model and Optimizer
-        self._load_model_and_optimizer()
-
-        # -- Scheduler and training state (rank0 only)
-        self._load_training_state_dict()
-        self._load_lr_scheduler_state_dict()
-
-        if dist.is_initialized():
-            dist.barrier()
-
+    def post_fsdp_load(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
+        self.load(rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint)
 
 # ----------------------------------------------------------------------- #
 #  Logger

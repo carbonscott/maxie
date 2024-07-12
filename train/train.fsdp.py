@@ -44,10 +44,8 @@ from maxie.tensor_transforms import (
 from maxie.utils_fsdp import (
     MemoryMaximizer,
     verify_bfloat_support,
-    TrainingStateDictConfig,
-    FullStateDictCheckpointConfig,
     FullStateDictCheckpoint,
-    broadcast_dict,
+    ShardedStateDictCheckpoint,
     init_logger,
 )
 from maxie.utils.monitor import (
@@ -139,6 +137,7 @@ fl_chkpt_prefix                 = chkpt_config.get("prefix")
 path_chkpt_prev                 = chkpt_config.get("path_chkpt_prev")
 chkpt_saving_iterations         = chkpt_config.get("chkpt_saving_iterations")
 preempt_chkpt_saving_iterations = chkpt_config.get("preempt_chkpt_saving_iterations")
+state_dict_type                 = chkpt_config.get("state_dict_type")
 
 # -- Dataset
 dataset_config       = config.get("dataset")
@@ -238,7 +237,7 @@ torchrun_exists = int(os.environ.get("RANK", -1)) != -1
 if not torchrun_exists: init_dist_env_on_summit()
 
 # --- Initialize distributed environment
-uses_dist = int(os.environ.get("RANK", -1)) != -1
+uses_dist = int(os.environ.get("WORLD_SIZE", 1)) > 1
 if uses_dist:
     dist_rank       = int(os.environ["RANK"      ])
     dist_local_rank = int(os.environ["LOCAL_RANK"])
@@ -269,23 +268,6 @@ memmax = MemoryMaximizer() if dist_local_rank == 0 else None
 #  FSDP SETUP
 # ----------------------------------------------------------------------- #
 # -- FSDP policy
-# --- Mixed precision
-mixed_precision = None
-if verify_bfloat_support:
-    dist_dtype = 'bfloat16'
-    mixed_precision = MixedPrecision(
-        param_dtype  = torch.bfloat16,
-        reduce_dtype = torch.bfloat16,
-        buffer_dtype = torch.bfloat16,
-    )
-else:
-    dist_dtype = 'float16'
-    mixed_precision = MixedPrecision(
-        param_dtype  = torch.float16,
-        reduce_dtype = torch.float16,
-        buffer_dtype = torch.float16,
-    )
-
 # --- Sharding strategy
 sharding_strategy = ShardingStrategy.FULL_SHARD
 
@@ -405,6 +387,16 @@ def custom_collate(batch):
     return torch.cat(batch_filtered, dim = 0) if len(batch_filtered) else None
 
 # ----------------------------------------------------------------------- #
+#  CHECKPOINT PRE FSDP
+# ----------------------------------------------------------------------- #
+checkpoint_func = {
+    "full"    : FullStateDictCheckpoint,
+    "sharded" : ShardedStateDictCheckpoint,
+}[state_dict_type] if uses_dist else Checkpoint
+checkpointer = checkpoint_func()
+from_resume = path_chkpt_prev is not None
+
+# ----------------------------------------------------------------------- #
 #  MODEL
 # ----------------------------------------------------------------------- #
 logger.debug(f'[RANK {dist_rank}] Configuring model...')
@@ -472,8 +464,17 @@ if version.parse(torch_version) <= version.parse("2.0.1"):
 if dist_rank == 0:
     logger.debug(f"{sum(p.numel() for p in model.parameters())/1e6} M pamameters.")
 
+if from_resume:
+    if isinstance(checkpointer, checkpoint_func):
+        checkpointer.pre_fsdp_load(dist_rank, model, path_chkpt_prev)
+
 # -- Mixed precision
 mixed_precision_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dist_dtype]
+mixed_precision = MixedPrecision(
+    param_dtype  = mixed_precision_dtype,
+    reduce_dtype = mixed_precision_dtype,
+    buffer_dtype = mixed_precision_dtype,
+)
 
 # --- Autocast
 device_type = 'cuda' if 'cuda' in device else 'cpu'
@@ -488,26 +489,6 @@ scaler = scaler_func(enabled=(dist_dtype == 'float16'))
 if compiles_model:
     logger.debug("Compiling the model...")
     model = torch.compile(model) # requires PyTorch 2.0
-
-# -- CHECKPOINT (FULL STATE DICT)
-print(f'[RANK {dist_rank}] Confguring model checkpoint...')
-chkpt_config_func = FullStateDictCheckpointConfig if uses_dist else CheckpointConfig
-checkpoint_func   = FullStateDictCheckpoint       if uses_dist else Checkpoint
-chkpt_config = chkpt_config_func(
-    model           = model,
-    optimizer       = None,
-    lr_scheduler    = None,
-    training_state  = None,
-    rank            = dist_rank,
-    device          = device,
-    path_checkpoint = path_chkpt_prev,
-)
-checkpointer = checkpoint_func(config = chkpt_config)
-from_resume = path_chkpt_prev is not None
-if from_resume:
-    if isinstance(checkpointer, FullStateDictCheckpoint):
-        # Model is loaded
-        checkpointer.pre_fsdp_load()
 
 # -- Wrapping the model in FSDP
 if uses_dist:
@@ -559,7 +540,7 @@ logger.debug(f'[RANK {dist_rank}] Configuring criterion (Skip, it is configured 
 
 
 # ----------------------------------------------------------------------- #
-#  Optimizer
+#  OPTIMIZER AND SCHEDULER
 # ----------------------------------------------------------------------- #
 logger.debug(f'[RANK {dist_rank}] Configuring optimizer...')
 param_iter = model.parameters()
@@ -578,35 +559,34 @@ scheduler = CosineLRScheduler(optimizer         = optimizer,
 
 
 # ----------------------------------------------------------------------- #
-#  CHECKPOINT (FULL STATE DICT)
+#  CHECKPOINT POST FSDP
 # ----------------------------------------------------------------------- #
 print(f'[RANK {dist_rank}] Confguring model, optim, scheduler, training state checkpoint...')
 # -- Set init training state dict
 loss_min = float('inf')
-training_state = TrainingStateDictConfig(
-    epoch       = 0,
-    seg         = 0,
-    start_idx   = dataset_train.start_idx,
-    end_idx     = dataset_train.end_idx,
-    loss_min    = loss_min,
+iter_state = dict(
+    epoch     = 0,
+    seg       = 0,
+    start_idx = dataset_train.start_idx,
+    end_idx   = dataset_train.end_idx,
+    loss_min  = loss_min,
 )
 
 # -- Optional resumption
 last_epoch = 0
-last_seg   = 0
+last_seg   = -1
 if from_resume:
-    if isinstance(checkpointer, FullStateDictCheckpoint):
+    if isinstance(checkpointer, checkpoint_func):
         # Optimizer, scheduler are loaded
-        checkpointer.post_fsdp_load(model, optimizer, scheduler, training_state)
+        checkpointer.post_fsdp_load(dist_rank, model, optimizer, scheduler, iter_state, path_chkpt_prev)
 
         # Training state
-        training_state = checkpointer.config.training_state
-        last_epoch     = training_state.epoch
-        last_seg       = training_state.seg
-        loss_min       = training_state.loss_min
+        last_epoch = iter_state.get("epoch")
+        last_seg   = iter_state.get("seg")
+        loss_min   = iter_state.get("loss_min")
 
         logger.info(f"Loading from checkpoint -- {path_chkpt_prev}.")
-        logger.info(f"PREV - last_epoch {last_epoch}, last_seg {training_state.start_idx}-{training_state.end_idx}, loss_min = {loss_min}")
+        logger.info(f"PREV - last_epoch {last_epoch}, last_seg {iter_state.get('start_idx')}-{iter_state.get('end_idx')}, loss_min = {loss_min}")
 
 
 # ----------------------------------------------------------------------- #
@@ -818,13 +798,14 @@ try:
         # Otherwise, update the dataset index according to the training state
         else:
             # Update the dataset status
-            dataset_train.start_idx = training_state.start_idx
-            dataset_train.end_idx   = training_state.end_idx
+            dataset_train.start_idx = iter_state.get("start_idx")
+            dataset_train.end_idx   = iter_state.get("end_idx")
 
         # -- Loop over dataset segments
         for seg in tqdm.tqdm(range(dataset_train.num_seg), desc = f'[RANK {dist_rank}] Segment'):
             # Skip previous segments up to and including the last_seg
-            if seg <= last_seg: continue
+            if epoch == last_epoch and seg <= last_seg:
+                continue
 
             # [PERFORMANCE]
             if dist_local_rank == 0:
@@ -863,6 +844,8 @@ try:
             # [WORKAROUND]
             # FIXME: Better data cleaning will eliminate None batch
             if batch_input_shape is None:
+                dist.barrier()
+                object_list = [None, ]
                 if dist_rank == 0:
                     dataset_eval_train.reset()
                     dataset_eval_train.set_start_idx(0)
@@ -885,8 +868,10 @@ try:
                         except StopIteration:
                             raise ValueError(f"[RANK {dist_rank}] No valid eval data found for obtaining the input shape!!!")
                             break
+                    object_list = [batch_input_shape, ]
                 if uses_dist:
-                    batch_input_shape = broadcast_dict(dict(batch_input_shape = batch_input_shape), src = 0, device = device).get('batch_input_shape')
+                    dist.broadcast_object_list(object_list, src = 0)
+                    batch_input_shape = object_list[0]
 
             # -- Loop over mini batches
             # --- Set up helper variables for gradient accum and reporting
@@ -959,7 +944,10 @@ try:
                     # Grad clipping
                     if grad_clip != 0.0:
                         scaler.unscale_(optimizer)
-                        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), grad_clip) \
+                                    if (not uses_dist) or sharding_strategy == ShardingStrategy.NO_SHARD \
+                                    else \
+                                    model.clip_grad_norm_(grad_clip)
 
                     # Update parameters
                     scaler.step(optimizer)
@@ -970,10 +958,12 @@ try:
                     iteration_counter += 1
 
                     # Obtain the mean total loss
-                    dist.all_reduce(total_loss, op = dist.ReduceOp.AVG)  # Avg across ranks
+                    if uses_dist:
+                        dist.all_reduce(total_loss, op = dist.ReduceOp.AVG)  # Avg across ranks
 
                     # Obtain the total number of tokens processed
-                    dist.all_reduce(total_num_tokens, op = dist.ReduceOp.SUM)  # Sum across ranks
+                    if uses_dist:
+                        dist.all_reduce(total_num_tokens, op = dist.ReduceOp.SUM)  # Sum across ranks
 
                     # Wait for all gpus to complete work
                     if device_type == "cuda":
@@ -1208,37 +1198,37 @@ try:
                             loss_min = validate_loss
 
                             # Collect training state
-                            training_state.epoch     = epoch
-                            training_state.seg       = seg
-                            training_state.start_idx = dataset_train.start_idx
-                            training_state.end_idx   = dataset_train.end_idx
-                            training_state.loss_min  = loss_min
+                            iter_state["epoch"]     = epoch
+                            iter_state["seg"]       = seg
+                            iter_state["start_idx"] = dataset_train.start_idx
+                            iter_state["end_idx"]   = dataset_train.end_idx
+                            iter_state["loss_min"]  = loss_min
 
                             dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
                             if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
                             path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
-                            checkpointer.save(model, optimizer, scheduler, training_state, path_chkpt)
+                            checkpointer.save(dist_rank, model, optimizer, scheduler, iter_state, path_chkpt)
                             logger.info(f"Saving checkpoint at {path_chkpt}.")
 
                         # All ranks wait until the end of evaluation by rank 0
                         # [WARNING] Expecting NCCL TIMEOUT ERROR if the evaluation takes too long
-                        if dist.is_initialized():
+                        if uses_dist:
                             dist.barrier()
                         logger.debug(f'[RANK {dist_rank}] Done evaluation...')
 
                     # ---- Preemptive checkpointing
                     if preempt_metadata_path is not None and is_action_due(iteration_counter, preempt_chkpt_saving_iterations):
                         # Collect training state
-                        training_state.epoch     = epoch
-                        training_state.seg       = seg
-                        training_state.start_idx = dataset_train.start_idx
-                        training_state.end_idx   = dataset_train.end_idx
-                        training_state.loss_min  = loss_min
+                        iter_state["epoch"]     = epoch
+                        iter_state["seg"]       = seg
+                        iter_state["start_idx"] = dataset_train.start_idx
+                        iter_state["end_idx"]   = dataset_train.end_idx
+                        iter_state["loss_min"]  = loss_min
 
                         dir_chkpt = f"{timestamp}.preempt"
                         if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
                         path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
-                        checkpointer.save(model, optimizer, scheduler, training_state, path_chkpt)
+                        checkpointer.save(dist_rank, model, optimizer, scheduler, iter_state, path_chkpt)
                         logger.info(f"[RANK {dist_rank}] Saving preemptive checkpoint (epoch {epoch}, end_idx {dataset_train.end_idx}) at {path_chkpt}.")
 
                         if dist_rank == 0:
@@ -1253,6 +1243,9 @@ try:
             # [PERFORMANCE]
             if dist_local_rank == 0:
                 memmax.stop()
+
+        # Reset last_seg
+        last_seg = -1
 
         # Reset the from_resume flag
         from_resume = False
