@@ -52,6 +52,7 @@ from maxie.utils.monitor import (
     ActivationMonitor,
     monitor_param_update_metrics,
 )
+from maxie.patches.build_metadata import patch_build_metadata
 
 # -- Import model from huggingface
 from transformers.models.vit_mae.configuration_vit_mae import ViTMAEConfig
@@ -263,6 +264,12 @@ seed_offset = dist_rank if uses_unique_world_seed else 0
 # --- Set up performance utility
 memmax = MemoryMaximizer() if dist_local_rank == 0 else None
 
+# -- Monkey patch one method (Not always required)
+torch_version = torch.__version__
+torch_version = torch_version[:torch_version.find("+") if "+" in torch_version else None]
+if version.parse(torch_version) <= version.parse("2.0.1"):
+    if state_dict_type == "sharded":
+        patch_build_metadata()
 
 # ----------------------------------------------------------------------- #
 #  FSDP SETUP
