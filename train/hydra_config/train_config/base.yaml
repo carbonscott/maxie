@@ -5,14 +5,15 @@ checkpoint:
   prefix                         : fsdp
   path_chkpt_prev                : null
   pretrain                       : null
+  state_dict_type                : full
 dataset:
   drop_last_in_sampler: true
   drop_last_in_loader : true
-  batch_size          : 2
+  batch_size          : 1
   num_workers         : 2
-  path_train          : experiments/datasets/test.json
-  path_eval           : experiments/datasets/test.json
-  seg_size            : 20
+  path_train          : experiments/datasets/dataset.train.json
+  path_eval           : experiments/datasets/dataset.eval.json
+  seg_size            : 4
   entry_per_cycle     : 1
   debug               : false
   server_address      : [localhost, 5000]
@@ -47,7 +48,7 @@ logging:
   prefix    : fsdp
   level     : debug
 loss:
-  grad_accum_steps: 10
+  grad_accum_steps: 2
 lr_scheduler:
   min_lr                     : !!float 1e-7
   total_iterations           : !!int 1_000_000
@@ -55,10 +56,8 @@ lr_scheduler:
   scheduler_update_iterations: 1
 misc:
   max_epochs          : 5
-  max_eval_iter       : 50
+  max_eval_iter       : 4
   max_eval_retry      : 2
-  num_gpus            : 4
-  uses_mixed_precision: true
   compiles_model      : false
   data_dump_on        : false
   peak_flops_per_sec  : !!float 112e12
