@@ -7,7 +7,7 @@ from torchvision.transforms.functional import rotate, normalize
 
 import random
 
-from math import ceil
+import math
 
 '''
 Batch augmentation.
@@ -15,6 +15,8 @@ Batch augmentation.
 Image shape: (B, C, H, W)
 '''
 
+import logging
+logger = logging.getLogger(__name__)
 
 class Pad:
     def __init__(self, H, W):
@@ -189,23 +191,21 @@ class Patchify:
         >>> patches = patchifier(imgs)
         >>> print(patches.shape)
     """
-    def __init__(self, patch_size, stride, flat_batch_and_patch = True):
-        self.patch_size           = patch_size
-        self.stride               = stride
-        self.flat_batch_and_patch = flat_batch_and_patch
+    def __init__(self, patch_size, stride):
+        self.patch_size = patch_size
+        self.stride     = stride
 
     def __call__(self, batch_img, **kwargs):
         """
         Arguments:
             img: (B, C, H, W)
         """
-        patch_size           = self.patch_size
-        stride               = self.stride
-        flat_batch_and_patch = self.flat_batch_and_patch
+        patch_size = self.patch_size
+        stride     = self.stride
 
         B, C, H, W = batch_img.shape
 
-        H_padded, W_padded = patch_size * ceil(H / patch_size), patch_size * ceil(W / patch_size)
+        H_padded, W_padded = patch_size * math.ceil(H / patch_size), patch_size * math.ceil(W / patch_size)
 
         padder = Pad(H_padded, W_padded)
         batch_img_padded = padder(batch_img)
@@ -225,11 +225,6 @@ class Patchify:
         # (B, C, patch_size, patch_size, num_patches) -> (B, num_patches, C, patch_size, patch_size)
         batch_patches = batch_patches.permute(0, 4, 1, 2, 3).contiguous()
 
-
-        if flat_batch_and_patch:
-            # (B, num_patches, C, patch_size, patch_size) -> (B * num_patches, C, patch_size, patch_size)
-            batch_patches = batch_patches.view(-1, C, patch_size, patch_size)
-
         return batch_patches
 
 
@@ -241,6 +236,156 @@ class Norm:
         mean, std = self.detector_norm_params[detector_name]["mean"], self.detector_norm_params[detector_name]["std"]
         C = img.shape[-3]
         return normalize(img, [mean]*C, [std]*C)
+
+
+class InstanceNorm:
+    def __init__(self, eps = 1e-6, checks_nan = True):
+        self.eps = eps
+        self.checks_nan = checks_nan
+
+    def __call__(self, img, **kwargs):
+        if self.checks_nan and torch.isnan(img).any():
+            logger.debug(f"NaN found in the input.")
+
+        B, C, H, W = img.size()
+        img_view = img.view(B, C, H*W)
+        mean = img_view.mean(dim=-1, keepdim=True)
+        var  = img_view.var (dim=-1, keepdim=True, correction=0)
+
+        img_norm = (img_view - mean) / torch.sqrt(var + self.eps)
+
+        return img_norm.view(B, C, H, W)
+
+
+class PolarCenterCrop:
+    def __init__(self, Hv, Wv, sigma = 0.33, num_crop = 1):
+        """
+        Performs random center cropping on batches of images using polar coordinates.
+
+        This class implements a batched multi-crop operation where crop centers are
+        determined using polar coordinates. It supports processing multiple images
+        simultaneously and generating multiple crops per image.
+
+        Key Features:
+        - Batch processing: Can process multiple images in a single call.
+        - Multi-crop: Generates multiple crops per image.
+        - Polar sampling: Uses polar coordinates for random center selection,
+          allowing for more controlled distribution of crop centers.
+        - Efficient implementation: Utilizes PyTorch's advanced indexing for fast cropping.
+
+        Args:
+            Hv (int): Height of the crop.
+            Wv (int): Width of the crop.
+            sigma (float, optional): Standard deviation for the radial distribution of crop centers.
+                                     Defaults to 0.33, following the 68-95-99.7 rule.
+            num_crop (int, optional): Number of crops to generate per image. Defaults to 1.
+
+        Example:
+            >>> cropper = PolarCenterCrop(224, 224, sigma=0.5, num_crop=5)
+            >>> batch = torch.rand(32, 1, 1920, 1920)  # 32 single-channel images of size 256x256
+            >>> crops = cropper(batch)  # Returns tensor of shape (32, 5, 1, 1920, 1920)
+
+        Note:
+            The input images should be PyTorch tensors with shape (B, C, H, W),
+            where B is the batch size, C is the number of channels, and H and W
+            are the height and width of the images respectively.
+        """
+        self.Hv       = Hv
+        self.Wv       = Wv
+        self.sigma    = sigma
+        self.num_crop = num_crop
+
+
+    def __call__(self, img, **kwargs):
+        """
+        Perform the multi-crop operation on a batch of images.
+
+        Args:
+            img (torch.Tensor): Input images tensor of shape (B, C, H, W),
+                                where B is the batch size, C is the number of channels,
+                                and H and W are the height and width of the images.
+
+        Returns:
+            torch.Tensor: Cropped images tensor of shape (B, N, C, Hv, Wv),
+                          where N is the number of crops per image, and Hv and Wv
+                          are the height and width of each crop.
+        """
+        Hv    = self.Hv
+        Wv    = self.Wv
+        sigma = self.sigma
+        N     = self.num_crop
+
+        # -- Valid H and W
+        B, C, H, W = img.shape
+        H_valid = H - Hv
+        W_valid = W - Wv
+
+        # -- Polar random sampling for determining the crop center
+        # Sample from uniform angle and Gaussian radius
+        device = img.device
+        theta  = torch.rand (B, N, device=device) * math.pi * 2  # (B, N)
+        radius = torch.randn(B, N, device=device).abs() * sigma  # (B, N)
+
+        # Convert them to Cartesian
+        cy = radius * torch.cos(theta)  # image y = Cartesian x
+        cx = radius * torch.sin(theta)  # image x = Cartesian y
+
+        # Clamp to avoid overflow
+        cy.clamp_(min = -1, max = 1)
+        cx.clamp_(min = -1, max = 1)
+
+        # Rescale it to half image length
+        cy *= H_valid/2
+        cx *= W_valid/2
+
+        # Calculate the top-left(tl) coordinates used for fancy indexing
+        tly = cy - Hv//2  # (B, N)
+        tlx = cx - Wv//2  # (B, N)
+        tly = tly.int()
+        tlx = tlx.int()
+
+        # -- Multi-crop
+        # Create a view of multiple images
+        img_expanded = img.unsqueeze(1).expand(-1,N,-1,-1,-1) # (B,C,H,W) -> (B,N,C,H,W)
+
+        # Create indexing tensor along each dimension (B, N, C, H, W)
+        idx_tensor_B = torch.arange(B , dtype=torch.int, device=device)
+        idx_tensor_N = torch.arange(N , dtype=torch.int, device=device)
+        idx_tensor_C = torch.arange(C , dtype=torch.int, device=device)
+        idx_tensor_H = torch.arange(Hv, dtype=torch.int, device=device)
+        idx_tensor_W = torch.arange(Wv, dtype=torch.int, device=device)
+
+        # Create meshgrid for advanced indexing
+        # Note: We only use the first three outputs, others are discarded
+        mesh_B, mesh_N, mesh_C, _, _ = torch.meshgrid(
+            idx_tensor_B,
+            idx_tensor_N,
+            idx_tensor_C,
+            idx_tensor_H,
+            idx_tensor_W,
+            indexing = 'ij'
+        )
+
+        # Generate indexing tensors for height and width
+        idx_tensor_W = tlx[:,:,None] + idx_tensor_W[None,None,:]  # tlx:(B,N,1) + idx_tensor_W:(1,1,Wv) -> (B,N,Wv)
+        idx_tensor_H = tly[:,:,None] + idx_tensor_H[None,None,:]  # tly:(B,N,1) + idx_tensor_H:(1,1,Hv) -> (B,N,Hv)
+
+        # Expand indexing tensors to match desired dimensions
+        idx_tensor_W = idx_tensor_W[:,:,None,:].expand(-1,-1,Hv,-1)  # (B,N,1,Wv) -> (B,N,Hv,Wv)
+        idx_tensor_H = idx_tensor_H[:,:,:,None].expand(-1,-1,-1,Wv)  # (B,N,Hv,1) -> (B,N,Hv,Wv)
+
+        # Create final advanced/fancy indexing tensors
+        mesh_H = idx_tensor_H[:,:,None,:,:].expand(B,-1,C,-1,-1)  # (B,N,1,Hv,Wv) -> (B,N,C,Hv,Wv)
+        mesh_W = idx_tensor_W[:,:,None,:,:].expand(B,-1,C,-1,-1)  # (B,N,1,Hv,Wv) -> (B,N,C,Hv,Wv)
+
+        # Apply indexing to get the final crops
+        return img_expanded[mesh_B, mesh_N, mesh_C, mesh_H, mesh_W]
+
+
+class MergeBatchPatchDims:
+    def __call__(self, x, **kwargs):
+        B, N, C, H, W = x.size()
+        return x.view(B*N, C, H, W)
 
 
 class BatchSampler:
@@ -258,3 +403,13 @@ class BatchSampler:
             image_tensor   = image_tensor.transpose(self.dim, 0)[sample_indices].transpose(0, self.dim)
 
         return image_tensor
+
+
+class NDArrayToTensor:
+    def __call__(self, x, **kwargs):
+        return torch.from_numpy(x)
+
+
+class NoTransform:
+    def __call__(self, x, **kwargs):
+        return x
