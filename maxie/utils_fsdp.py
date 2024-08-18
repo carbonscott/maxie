@@ -277,10 +277,10 @@ def broadcast_dict(obj, src=0, device = 'cpu'):
 # ----------------------------------------------------------------------- #
 # -- 1. FULL STATE DICT
 class FullStateDictCheckpoint:
-    MODEL_STATE_DICT_FILE = 'model_full_state_dict.pt'
-    OPTIM_STATE_DICT_FILE = 'optim_full_state_dict.pt'
-    LR_STATE_DICT_FILE    = 'lr_full_state_dict.pt'
-    ITER_STATE_DICT_FILE  = 'iter_full_state_dict.pt'
+    MODEL_STATE_DICT_FILE = 'model_state_dict.pt'
+    OPTIM_STATE_DICT_FILE = 'optim_state_dict.pt'
+    LR_STATE_DICT_FILE    = 'lr_state_dict.pt'
+    ITER_STATE_DICT_FILE  = 'iter_state_dict.pt'
 
     def __init__(self):
         self.state_dict_config = FullStateDictConfig(
@@ -327,23 +327,6 @@ class FullStateDictCheckpoint:
             optim_state_dict_config = optim_dict_config,
         )
         model.load_state_dict(model_state_dict)
-
-    def load_optimizer_checkpoint(self, rank, model, optimizer, path_checkpoint_optim):
-        dist.barrier()
-
-        state_dict_config = self.state_dict_config
-        optim_dict_config = self.optim_dict_config
-
-        full_optim_state_dict = None
-
-        if rank == 0 or not optim_dict_config.rank0_only:
-            full_optim_state_dict = torch.load(path_checkpoint_optim)
-
-        sharded_optim_state_dict = FSDP.scatter_full_optim_state_dict(
-            full_optim_state_dict = full_optim_state_dict,
-            model = model,
-        )
-        optimizer.load_state_dict(sharded_optim_state_dict)
 
     def save_optimizer_checkpoint(self, rank, model, optimizer, path_checkpoint_optim):
         state_dict_config = self.state_dict_config
@@ -435,7 +418,8 @@ class FullStateDictCheckpoint:
 
         dist.broadcast_object_list(object_list, src = 0)
         iter_state_saved = object_list[0]
-        iter_state = iter_state_saved
+        iter_state.clear()
+        iter_state.update(iter_state_saved)
 
     def save(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
         os.makedirs(path_checkpoint, exist_ok = True)
@@ -507,10 +491,10 @@ class FullStateDictCheckpoint:
 
 # -- 2. SHARDED STATE DICT
 class ShardedStateDictCheckpoint:
-    MODEL_STATE_DICT_FILE = 'model_full_state_dict.pt'
-    OPTIM_STATE_DICT_FILE = 'optim_full_state_dict.pt'
-    LR_STATE_DICT_FILE    = 'lr_full_state_dict.pt'
-    ITER_STATE_DICT_FILE  = 'iter_full_state_dict.pt'
+    MODEL_STATE_DICT_DIR = 'model_state_dict.pt'
+    OPTIM_STATE_DICT_DIR = 'optim_state_dict.pt'
+    LR_STATE_DICT_FILE   = 'lr_state_dict.pt'
+    ITER_STATE_DICT_FILE = 'iter_state_dict.pt'
 
     def __init__(self):
         self.state_dict_config = ShardedStateDictConfig(
@@ -647,12 +631,13 @@ class ShardedStateDictCheckpoint:
 
         dist.broadcast_object_list(object_list, src = 0)
         iter_state_saved = object_list[0]
-        iter_state = iter_state_saved
+        iter_state.clear()
+        iter_state.update(iter_state_saved)
 
     def save(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
         os.makedirs(path_checkpoint, exist_ok = True)
-        path_checkpoint_model      = os.path.join(path_checkpoint, self.MODEL_STATE_DICT_FILE)
-        path_checkpoint_optim      = os.path.join(path_checkpoint, self.OPTIM_STATE_DICT_FILE)
+        path_checkpoint_model      = os.path.join(path_checkpoint, self.MODEL_STATE_DICT_DIR)
+        path_checkpoint_optim      = os.path.join(path_checkpoint, self.OPTIM_STATE_DICT_DIR)
         path_checkpoint_lr         = os.path.join(path_checkpoint, self.LR_STATE_DICT_FILE)
         path_checkpoint_iter_state = os.path.join(path_checkpoint, self.ITER_STATE_DICT_FILE)
 
@@ -669,8 +654,8 @@ class ShardedStateDictCheckpoint:
             self.save_iter_state_checkpoint(rank, iter_state, path_checkpoint_iter_state)
 
     def load(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
-        path_checkpoint_model      = os.path.join(path_checkpoint, self.MODEL_STATE_DICT_FILE)
-        path_checkpoint_optim      = os.path.join(path_checkpoint, self.OPTIM_STATE_DICT_FILE)
+        path_checkpoint_model      = os.path.join(path_checkpoint, self.MODEL_STATE_DICT_DIR)
+        path_checkpoint_optim      = os.path.join(path_checkpoint, self.OPTIM_STATE_DICT_DIR)
         path_checkpoint_lr         = os.path.join(path_checkpoint, self.LR_STATE_DICT_FILE)
         path_checkpoint_iter_state = os.path.join(path_checkpoint, self.ITER_STATE_DICT_FILE)
 
