@@ -3,6 +3,7 @@ import csv
 import json
 import socket
 import numpy as np
+from bisect import bisect_right
 
 from math import ceil
 from itertools import islice
@@ -24,6 +25,38 @@ from ..perf import Timer
 
 import logging
 logger = logging.getLogger(__name__)
+
+def _myrank():
+    return dist.get_rank() if dist.is_initialized() else 0
+
+class EventList:
+    """Logical list of events, addressible by integers
+       in 0, ..., len(EventList)-1
+    """
+    def __init__(self, path : str) -> None:
+        logger.debug(f"[RANK %d] Loading json.", _myrank())
+        with open(path, 'r') as f:
+            self.entry_list = json.load(f)
+
+        self.sizes = [entry['num_events'] \
+                      if entry['events'] is None \
+                      else len(entry['events']) \
+                      for entry in self.entry_list]
+        self.starts = np.array(self.sizes).cumsum()
+        self.nitems = self.starts[-1]
+
+    def __len__(self):
+        return self.nitems
+
+    def __getitem__(self, i):
+        PSANA_ACCESS_MODE = 'idx'
+        j = bisect_right(self.starts, i)
+        i -= self.starts[j]
+        entry = self.entry_list[j]
+        if entry["events"] is not None:
+            i = entry["events"][i]
+        return entry["exp"], entry["run"], PSANA_ACCESS_MODE, \
+               entry["detector_name"], i
 
 # ----------------------------------------------------------------------- #
 #  DATALOADER FOR TRAINING BY ALL RANKS
@@ -60,7 +93,6 @@ class IPCDistributedSegmentedDataset(Dataset):
     distributed processes.
     """
     def __init__(self, config: IPCDistributedSegmentedDatasetConfig):
-        self.path_json              = config.path_json
         self.seg_size               = config.seg_size
         self.world_size             = config.world_size
         self.server_address         = config.server_address
@@ -70,8 +102,8 @@ class IPCDistributedSegmentedDataset(Dataset):
         self.entry_per_cycle        = config.entry_per_cycle
         self.debug                  = config.debug
 
-        self.json_entry_list = self._load_json()
-        self.total_size      = self._get_total_size()
+        self.events          = EventList(config.path_json)
+        self.total_size      = len(self.events)
 
         self.json_entry_gen  = None
         self.current_dataset = None
@@ -88,22 +120,12 @@ class IPCDistributedSegmentedDataset(Dataset):
         if self.debug:
             logger.debug(f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] Dataset reset done.")
 
-    def _load_json(self):
-        if self.debug:
-            logger.debug(f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] Loading json.")
-        with open(self.path_json, 'r') as file:
-            entry_list = json.load(file)
-        return entry_list
-
-    def _get_total_size(self):
-        return sum([entry['num_events'] if entry['events'] is None else len(entry['events']) for entry in self.json_entry_list]) # Use constants to represent the magic value
-
     def _init_entry_generator(self):
         if self.debug:
-            logger.debug(f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] Initializing entry generator.")
+            logger.debug("[RANK %d] Initializing entry generator.", _myrank())
         PSANA_ACCESS_MODE = 'idx'
         entry_gens = []
-        for entry in self.json_entry_list:
+        for entry in self.events.entry_list:
             exp           = entry['exp'          ]
             run           = entry['run'          ]
             detector_name = entry['detector_name']
@@ -182,7 +204,7 @@ class IPCDistributedSegmentedDataset(Dataset):
         exp, run, access_mode, detector_name, event = self.current_dataset[idx]
 
         # Fetch event
-        image = self.fetch_event(exp, run, access_mode, detector_name, event)    # psana image: (H, W)
+        image = fetch_event(self.server_address, exp, run, access_mode, detector_name, event)    # psana image: (H, W)
 
         # [DEBUG]
         if self.debug:
@@ -223,58 +245,6 @@ class IPCDistributedSegmentedDataset(Dataset):
         if dist.is_initialized():
             dist.barrier()
 
-    def fetch_event(self, exp, run, access_mode, detector_name, event):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.connect(self.server_address)
-
-            # Send request
-            request_data = json.dumps({
-                'exp'          : exp,
-                'run'          : run,
-                'access_mode'  : access_mode,
-                'detector_name': detector_name,
-                'event'        : event,
-                'mode'         : 'image',
-            })
-            sock.sendall(request_data.encode('utf-8'))
-
-            # Receive and process response
-            response_data = sock.recv(4096).decode('utf-8')
-
-            # Process response with a non-empty string
-            result = None
-            if len(response_data):
-                # Load the reponse data
-                response_json = json.loads(response_data)
-
-                if 'error' in response_json:
-                    logger.debug(f"Server error: {response_json['error']}")
-                    if response_json['traceback'] is not None: logger.debug(response_json['traceback'])
-                else:
-                    # Use the JSON data to access the shared memory
-                    shm_name = response_json['name']
-                    shape    = response_json['shape']
-                    dtype    = np.dtype(response_json['dtype'])
-
-                    # Initialize shared memory outside of try block to ensure it's in scope for finally block
-                    shm = None
-                    try:
-                        # Access the shared memory
-                        shm = shared_memory.SharedMemory(name=shm_name)
-                        data_array = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
-
-                        # Convert to numpy array (this creates a copy of the data)
-                        result = np.array(data_array)
-                    finally:
-                        # Ensure shared memory is closed even if an exception occurs
-                        if shm:
-                            shm.close()
-                            shm.unlink()
-
-                # Send acknowledgment after successfully accessing shared memory
-                sock.sendall("ACK".encode('utf-8'))
-
-            return result
 
 
 # ----------------------------------------------------------------------- #
@@ -285,12 +255,12 @@ class IPCDatasetConfig:
     """Configuration for the Inter-Processor Communication based Dataset.
 
     Attributes:
-        full_dataset (List): The complete dataset details to be segmented and distributed.
+        path_json (str)              : JSON file to configure the dataset list.
         transforms (List): A list of transformations to apply to each data item.
         is_perf (bool): Flag to enable performance timing for transformations. Default is False.
         server_address (str): URL of the server to fetch data from. Defaults to 'http://localhost:5001'.
     """
-    full_dataset             : List
+    path_json                : str
     transforms               : List
     is_perf                  : bool = False
     server_address           : Tuple = ('localhost', 5000)
@@ -303,17 +273,17 @@ class IPCDataset(Dataset):
     distributed processes.
     """
     def __init__(self, config: IPCDatasetConfig):
-        self.full_dataset   = config.full_dataset
+        self.events         = EventList(config.path_json)
         self.server_address = config.server_address
         self.transforms     = config.transforms
         self.is_perf        = config.is_perf
 
     def __len__(self):
-        return len(config.full_dataset)
+        return len(self.events)
 
     def __getitem__(self, idx):
         # Obtain dataset handle
-        exp, run, access_mode, detector_name, event = self.full_dataset[idx]
+        exp, run, access_mode, detector_name, event = self.events[idx]
 
         # Fetch event
         image = self.fetch_event(exp, run, access_mode, detector_name, event)    # psana image: (H, W)
@@ -328,46 +298,55 @@ class IPCDataset(Dataset):
 
         return image_tensor[0]    # Dataloader only wants data with shape of (C, H, W)
 
-    def fetch_event(self, exp, run, access_mode, detector_name, event):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.connect(self.server_address)
+def fetch_event(server_address, exp, run, access_mode, detector_name, event):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.connect(server_address)
 
-            # Send request
-            request_data = json.dumps({
-                'exp'          : exp,
-                'run'          : run,
-                'access_mode'  : access_mode,
-                'detector_name': detector_name,
-                'event'        : event,
-                'mode'         : 'image',
-            })
-            sock.sendall(request_data.encode('utf-8'))
+        # Send request
+        request_data = json.dumps({
+            'exp'          : exp,
+            'run'          : int(run),
+            'access_mode'  : access_mode,
+            'detector_name': detector_name,
+            'event'        : int(event),
+            'mode'         : 'image',
+        })
+        sock.sendall(request_data.encode('utf-8'))
 
-            # Receive and process response
-            response_data = sock.recv(4096).decode('utf-8')
+        # Receive and process response
+        response_data = sock.recv(4096).decode('utf-8')
+
+        # Process response with a non-empty string
+        result = None
+        if len(response_data):
+            # Load the reponse data
             response_json = json.loads(response_data)
 
-            # Use the JSON data to access the shared memory
-            shm_name = response_json['name']
-            shape    = response_json['shape']
-            dtype    = np.dtype(response_json['dtype'])
+            if 'error' in response_json:
+                logger.debug(f"Server error: {response_json['error']}")
+                if response_json['traceback'] is not None: logger.debug(response_json['traceback'])
+            else:
+                # Use the JSON data to access the shared memory
+                shm_name = response_json['name']
+                shape    = response_json['shape']
+                dtype    = np.dtype(response_json['dtype'])
 
-            # Initialize shared memory outside of try block to ensure it's in scope for finally block
-            shm = None
-            try:
-                # Access the shared memory
-                shm = shared_memory.SharedMemory(name=shm_name)
-                data_array = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+                # Initialize shared memory outside of try block to ensure it's in scope for finally block
+                shm = None
+                try:
+                    # Access the shared memory
+                    shm = shared_memory.SharedMemory(name=shm_name)
+                    data_array = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
 
-                # Convert to numpy array (this creates a copy of the data)
-                result = np.array(data_array)
-            finally:
-                # Ensure shared memory is closed even if an exception occurs
-                if shm:
-                    shm.close()
-                    shm.unlink()
+                    # Convert to numpy array (this creates a copy of the data)
+                    result = np.array(data_array)
+                finally:
+                    # Ensure shared memory is closed even if an exception occurs
+                    if shm:
+                        shm.close()
+                        shm.unlink()
 
             # Send acknowledgment after successfully accessing shared memory
             sock.sendall("ACK".encode('utf-8'))
 
-            return result
+        return result
