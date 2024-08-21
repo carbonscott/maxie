@@ -32,6 +32,7 @@ from maxie.utils.checkpoint  import CheckpointConfig, Checkpoint
 from maxie.lr_scheduler      import CosineLRScheduler
 from maxie.perf              import Timer
 from maxie.tensor_transforms import (
+    NoTransform,
     Pad,
     DownscaleLocalMean,
     RandomPatch,
@@ -137,34 +138,49 @@ dir_root_chkpt                  = chkpt_config.get("directory")
 fl_chkpt_prefix                 = chkpt_config.get("prefix")
 path_chkpt_prev                 = chkpt_config.get("path_chkpt_prev")
 chkpt_saving_iterations         = chkpt_config.get("chkpt_saving_iterations")
+preempt_metadata_path           = chkpt_config.get("preempt_metadata_path", os.environ.get('PREEMPT_METADATA_PATH', None))
 preempt_chkpt_saving_iterations = chkpt_config.get("preempt_chkpt_saving_iterations")
 state_dict_type                 = chkpt_config.get("state_dict_type")
 
 # -- Dataset
-dataset_config       = config.get("dataset")
-path_train_json      = dataset_config.get("path_train")
-path_eval_json       = dataset_config.get("path_eval")
-drop_last_in_sampler = dataset_config.get("drop_last_in_sampler")
-drop_last_in_loader  = dataset_config.get("drop_last_in_loader")
-batch_size           = dataset_config.get("batch_size")
-num_workers          = dataset_config.get("num_workers")
-seg_size             = dataset_config.get("seg_size")
-entry_per_cycle      = dataset_config.get("entry_per_cycle")
-debug_dataloading    = dataset_config.get("debug")
-server_address       = dataset_config.get("server_address")
-transforms_config    = dataset_config.get("transforms")
-num_patch            = transforms_config.get("num_patch")
-size_patch           = transforms_config.get("size_patch")
-frac_shift_max       = transforms_config.get("frac_shift_max")
-angle_max            = transforms_config.get("angle_max")
-var_size_patch       = transforms_config.get("var_size_patch")
-downscale_factors    = transforms_config.get("downscale_factors")
-H_pad                = transforms_config.get("H_pad")
-W_pad                = transforms_config.get("W_pad")
-patch_size           = transforms_config.get("patch_size")
-stride               = transforms_config.get("stride")
-detector_norm_params = transforms_config.get("norm")
-sampling_fraction    = transforms_config.get("sampling_fraction", None)
+dataset_config         = config.get("dataset")
+path_train_json        = dataset_config.get("path_train")
+path_eval_json         = dataset_config.get("path_eval")
+drop_last_in_sampler   = dataset_config.get("drop_last_in_sampler")
+drop_last_in_loader    = dataset_config.get("drop_last_in_loader")
+batch_size             = dataset_config.get("batch_size")
+num_workers            = dataset_config.get("num_workers")
+seg_size               = dataset_config.get("seg_size")
+pin_memory             = dataset_config.get("pin_memory")
+prefetch_factor        = dataset_config.get("prefetch_factor")
+entry_per_cycle        = dataset_config.get("entry_per_cycle")
+debug_dataloading      = dataset_config.get("debug")
+server_address         = dataset_config.get("server_address")
+transforms_config      = dataset_config.get("transforms")
+num_patch              = transforms_config.get("num_patch")
+size_patch             = transforms_config.get("size_patch")
+frac_shift_max         = transforms_config.get("frac_shift_max")
+angle_max              = transforms_config.get("angle_max")
+var_size_patch         = transforms_config.get("var_size_patch")
+downscale_factors      = transforms_config.get("downscale_factors")
+patch_size             = transforms_config.get("patch_size")
+stride                 = transforms_config.get("stride")
+detector_norm_params   = transforms_config.get("norm")
+sampling_fraction      = transforms_config.get("sampling_fraction", None)
+H_pad                  = transforms_config.get("H_pad")
+W_pad                  = transforms_config.get("W_pad")
+Hv                     = transforms_config.get("Hv")
+Wv                     = transforms_config.get("Wv")
+sigma                  = transforms_config.get("sigma")
+num_crop               = transforms_config.get("num_crop")
+set_transforms         = transforms_config.get("set")
+uses_pad               = set_transforms.get("pad")
+uses_random_patch      = set_transforms.get("random_patch")
+uses_random_rotate     = set_transforms.get("random_rotate")
+uses_random_shift      = set_transforms.get("random_shift")
+uses_polar_center_crop = set_transforms.get("polar_center_crop")
+uses_batch_sampler     = set_transforms.get("batch_sampler")
+
 
 # -- Model
 model_params    = config.get("model")
@@ -214,6 +230,7 @@ data_dump_on       = misc_config.get("data_dump_on", False)
 cpu_only           = misc_config.get("cpu_only", False)
 peak_flops_per_sec = misc_config.get("peak_flops_per_sec")
 monitors_dynamics  = misc_config.get("monitors_dynamics")
+sharding_stage     = misc_config.get("sharding_stage")
 
 # ----------------------------------------------------------------------- #
 #  MISC FEATURES
@@ -276,7 +293,11 @@ if version.parse(torch_version) <= version.parse("2.0.1"):
 # ----------------------------------------------------------------------- #
 # -- FSDP policy
 # --- Sharding strategy
-sharding_strategy = ShardingStrategy.FULL_SHARD
+sharding_strategy = dict(
+    zero3 = ShardingStrategy.FULL_SHARD,
+    zero2 = ShardingStrategy.SHARD_GRAD_OP,
+    zero0 = ShardingStrategy.NO_SHARD,
+)[sharding_stage]
 
 # --- Wrapping strategy
 # ---- Use built-in transformer wrap policy
@@ -292,7 +313,7 @@ auto_wrap_policy = partial(
 # --- Activation checkpointing
 non_reentrant_wrapper = partial(
     checkpoint_wrapper,
-    offload_to_cpu  = False,
+    ## offload_to_cpu  = False,
     checkpoint_impl = CheckpointImpl.NO_REENTRANT,
 )
 
@@ -344,15 +365,36 @@ world_seed = base_seed + seed_offset
 set_seed(world_seed)
 
 # -- Set up transformation
+pre_transforms = (
+    Pad(H_pad, W_pad) if uses_pad else NoTransform(),
+)
+
 transforms = (
-    Norm(detector_norm_params),
+    ## Norm(detector_norm_params),
     Pad(H_pad, W_pad),
     ## DownscaleLocalMean(factors = downscale_factors),
-    ## RandomPatch(num_patch = num_patch, H_patch = size_patch, W_patch = size_patch, var_H_patch = var_size_patch, var_W_patch = var_size_patch, returns_mask = False),
-    ## RandomRotate(angle_max),
-    RandomShift(frac_y_shift_max = frac_shift_max, frac_x_shift_max = frac_shift_max),
-    Patchify(patch_size, stride),
-    BatchSampler(sampling_fraction),
+    ## Patchify(patch_size, stride),
+    PolarCenterCrop(
+        Hv       = Hv,
+        Wv       = Wv,
+        sigma    = sigma,
+        num_crop = num_crop,
+    ) if uses_polar_center_crop else NoTransform(),
+    MergeBatchPatchDims() if merges_batch_patch_dims else NoTransform(),
+    BatchSampler(sampling_fraction) if uses_batch_sampler else NoTransform(),
+    RandomPatch(
+        num_patch    = num_patch,
+        H_patch      = size_patch,
+        W_patch      = size_patch,
+        var_H_patch  = var_size_patch,
+        var_W_patch  = var_size_patch,
+        returns_mask = False,
+    ) if uses_random_patch  else NoTransform(),
+    RandomRotate(angle_max) if uses_random_rotate else NoTransform(),
+    RandomShift(
+        frac_y_shift_max = frac_shift_max,
+        frac_x_shift_max = frac_shift_max,
+    ) if uses_random_shift  else NoTransform(),
 )
 
 # -- Set up training set
@@ -360,7 +402,7 @@ ipc_dataset_train_config = IPCDistributedSegmentedDatasetConfig(
     path_json             = path_train_json,
     seg_size              = seg_size,
     world_size            = dist_world_size,
-    transforms            = transforms,
+    transforms            = pre_transforms,
     is_perf               = True,
     server_address        = tuple(server_address),
     loads_segment_in_init = False,
@@ -378,7 +420,7 @@ ipc_dataset_eval_config = IPCDistributedSegmentedDatasetConfig(
     path_json             = path_eval_json,
     seg_size              = seg_size,
     world_size            = dist_world_size,
-    transforms            = transforms,
+    transforms            = pre_transforms,
     is_perf               = True,
     server_address        = tuple(server_address),
     loads_segment_in_init = False,
@@ -511,7 +553,7 @@ if uses_dist:
         forward_prefetch  = True,
         sharding_strategy = sharding_strategy,
         limit_all_gathers = True,
-        use_orig_params   = True,
+        use_orig_params   = False,
         device_id         = device,
     )
 
@@ -608,7 +650,18 @@ if monitors_dynamics:
 #  HELPER
 # ----------------------------------------------------------------------- #
 @torch.no_grad()
-def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '', device = 'cpu', dummy_input_shape = None, **kwargs):
+def estimate_loss(
+    dataloader,
+    model,
+    autocast_context,
+    max_iter              = None,
+    desc                  = '',
+    device                = 'cpu',
+    dummy_input_shape     = None,
+    mixed_precision_dtype = torch.float32,
+    transforms            = None,
+    **kwargs
+):
     ''' Estimate loss.
         The dataloader should be wrapped with Dataloader class or
         DistributedSampler class, best with shuffle being true.  The shuffle
@@ -654,11 +707,16 @@ def estimate_loss(dataloader, model, autocast_context, max_iter = None, desc = '
         # FIXME: Better data cleaning will eliminate None batch
         if batch_data is None:
             logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {enum_idx}.  Creating a dummy input!!!")
-            batch_data = torch.zeros(dummy_input_shape, device = device)
+            batch_data = torch.zeros(dummy_input_shape, dtype = mixed_precision_dtype)
             none_mask[enum_idx] = 1
 
         batch_input = batch_data
-        batch_input = batch_input.to(device, non_blocking = True)
+        batch_input = batch_input.to(device, non_blocking = True, dtype = mixed_precision_dtype)
+
+        # Optional transform
+        if transforms is not None:
+            for enum_idx, trans in enumerate(transforms):
+                batch_input = trans(batch_input)
 
         if dist_rank == 0:
             logger.debug(f"[RANK {dist_rank}] EVAL - Post fetching")
@@ -788,7 +846,6 @@ def estimate_mfu_per_iteration(model, total_num_tokens_per_iteration, t_detla, p
 #  TRAINING LOOP
 # ----------------------------------------------------------------------- #
 batch_input_shape = None
-preempt_metadata_path = os.environ.get('PREEMPT_METADATA_PATH', None)
 logger.debug(f'[RANK {dist_rank}] Ready for training loop...')
 iteration_counter = 0  # One iteration is one param update after one or a few forward/backward pass
 try:
@@ -814,16 +871,18 @@ try:
             if epoch == last_epoch and seg <= last_seg:
                 continue
 
-            # [PERFORMANCE]
-            if dist_local_rank == 0:
-                memmax.start()
-
             # Switch to training state
             model.train()
 
             # Prepare training on one segment (iteration)
-            # Set next segment
-            dataset_train.set_start_idx(dataset_train.end_idx)
+            # Set next segment or break the loop when having no next segment
+            requires_reset = dataset_train.set_start_idx(dataset_train.end_idx)
+            if requires_reset:
+                break
+
+            # [PERFORMANCE]
+            if dist_local_rank == 0:
+                memmax.start()
 
             if dist_rank == 0:
                 logger.info(f"Working on segment: {dataset_train.start_idx}:{dataset_train.end_idx}; Total size: {dataset_train.total_size}")
@@ -837,11 +896,13 @@ try:
             ) if uses_dist else None
             dataloader = torch.utils.data.DataLoader(
                 dataset_train,
-                batch_size  = batch_size,
-                sampler     = sampler,
-                num_workers = num_workers,
-                collate_fn  = custom_collate,
-                drop_last   = drop_last_in_loader,
+                batch_size      = batch_size,
+                sampler         = sampler,
+                num_workers     = num_workers,
+                collate_fn      = custom_collate,
+                drop_last       = drop_last_in_loader,
+                pin_memory      = pin_memory,
+                prefetch_factor = prefetch_factor,
             )
 
             # Shuffle the training example
@@ -890,7 +951,7 @@ try:
 
             # Aggregate the loss and number of processed tokens during each gradient accumulation
             total_loss       = torch.tensor(0.0, device = device)
-            total_num_tokens = torch.tensor(0, device = device)
+            total_num_tokens = torch.tensor(0.0, device = device)
 
             # Set a timer flag
             starts_timer = True
@@ -912,10 +973,15 @@ try:
                 # FIXME: Better data cleaning will eliminate None batch
                 if batch_data is None:
                     logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {batch_idx}.  Creating a dummy input!!!")
-                    batch_data = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype, device = device)
+                    batch_data = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype)
 
                 batch_input = batch_data  # (B, C, H, W)
-                batch_input = batch_input.to(device, non_blocking = True)
+                batch_input = batch_input.to(device, non_blocking = True, dtype = mixed_precision_dtype)
+
+                # Optional transform
+                if transforms is not None:
+                    for enum_idx, trans in enumerate(transforms):
+                        batch_input = trans(batch_input)
 
                 # Specify the effective grad accum steps
                 real_grad_accum_steps = grad_accum_steps if batch_idx < start_idx_remainder_batches else num_remainder_batches
@@ -936,7 +1002,7 @@ try:
                     # Accumulate number of tokens processed
                     total_numel = batch_data.numel()  # Get number of numeric elements
                     token_size  = model.config.patch_size**2
-                    num_tokens  = total_numel // token_size
+                    num_tokens  = total_numel / token_size
                     total_num_tokens += num_tokens
 
                     # Backward
@@ -1109,7 +1175,7 @@ try:
                         num_eval_retry = 0
                         while torch.isnan(train_loss) and (num_eval_retry < max_eval_retry):
                             dataset_eval_train.reset()
-                            high_seg_idx = dataset_eval_train.total_size - seg_size * dist_world_size
+                            high_seg_idx = max(dataset_eval_train.total_size - seg_size * dist_world_size, 1)
                             rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
                             dataset_eval_train.set_start_idx(rand_start_idx)
 
@@ -1121,12 +1187,14 @@ try:
                             ) if uses_dist else None
                             dataloader_eval = torch.utils.data.DataLoader(
                                 dataset_eval_train,
-                                batch_size  = batch_size,
-                                sampler     = sampler_eval,
-                                num_workers = num_workers,
-                                shuffle     = False,
-                                collate_fn  = custom_collate,
-                                drop_last   = drop_last_in_loader,
+                                batch_size      = batch_size,
+                                sampler         = sampler_eval,
+                                num_workers     = num_workers,
+                                shuffle         = False,
+                                collate_fn      = custom_collate,
+                                drop_last       = drop_last_in_loader,
+                                pin_memory      = pin_memory,
+                                prefetch_factor = prefetch_factor,
                             )
 
                             # Shuffle the training example
@@ -1138,10 +1206,12 @@ try:
                                 dataloader_eval,
                                 model,
                                 autocast_context,
-                                max_iter          = max_eval_iter,
-                                desc              = '(training set)',
-                                device            = device,
-                                dummy_input_shape = batch_input_shape,
+                                max_iter              = max_eval_iter,
+                                desc                  = '(training set)',
+                                device                = device,
+                                dummy_input_shape     = batch_input_shape,
+                                mixed_precision_dtype = mixed_precision_dtype,
+                                transforms            = transforms,
                                 **data_dump_timestamp,
                             )
                             num_eval_retry += 1
@@ -1158,7 +1228,7 @@ try:
                         num_eval_retry = 0
                         while torch.isnan(validate_loss) and (num_eval_retry < max_eval_retry):
                             dataset_eval_val.reset()
-                            high_seg_idx = dataset_eval_val.total_size - seg_size * dist_world_size
+                            high_seg_idx = max(dataset_eval_val.total_size - seg_size * dist_world_size, 1)
                             rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
                             dataset_eval_val.set_start_idx(rand_start_idx)
 
@@ -1170,12 +1240,14 @@ try:
                             ) if uses_dist else None
                             dataloader_eval = torch.utils.data.DataLoader(
                                 dataset_eval_val,
-                                batch_size  = batch_size,
-                                sampler     = sampler_eval,
-                                num_workers = num_workers,
-                                shuffle     = False,
-                                collate_fn  = custom_collate,
-                                drop_last   = drop_last_in_loader,
+                                batch_size      = batch_size,
+                                sampler         = sampler_eval,
+                                num_workers     = num_workers,
+                                shuffle         = False,
+                                collate_fn      = custom_collate,
+                                drop_last       = drop_last_in_loader,
+                                pin_memory      = pin_memory,
+                                prefetch_factor = prefetch_factor,
                             )
 
                             # Shuffle the validation example
@@ -1186,10 +1258,12 @@ try:
                                 dataloader_eval,
                                 model,
                                 autocast_context,
-                                max_iter          = max_eval_iter,
-                                desc              = '(validation set)',
-                                device            = device,
-                                dummy_input_shape = batch_input_shape,
+                                max_iter              = max_eval_iter,
+                                desc                  = '(validation set)',
+                                device                = device,
+                                dummy_input_shape     = batch_input_shape,
+                                mixed_precision_dtype = mixed_precision_dtype,
+                                transforms            = transforms,
                                 **data_dump_timestamp,
                             )
                             num_eval_retry += 1
