@@ -44,7 +44,7 @@ def estimate_linear_flops(in_features, out_features, count_multiply_add_as=2):
     return count_multiply_add_as * in_features * out_features
 
 
-def estimate_transformer_mfu(model_hidden_size, num_heads, num_layers, context_length):
+def estimate_transformer_flops(model_hidden_size, num_heads, num_layers, context_length):
     """
     | Operation                   | Input shape           | Output shape | Ops         | Reshape                                   | FLOPs         |
     |-----------------------------|-----------------------|--------------|-------------|-------------------------------------------|---------------|
@@ -59,11 +59,11 @@ def estimate_transformer_mfu(model_hidden_size, num_heads, num_layers, context_l
     """
     head_hidden_size = model_hidden_size / num_heads
 
-    mfu_in_kqv_proj = (2*model_hidden_size)*(3*head_hidden_size*num_heads)               # (2E)(3HNBT)
-    mfu_in_kq       = (2*head_hidden_size)*(num_heads*context_length*context_length)     # (2H)(BNTT)
-    mfu_in_softmax  = 3*(num_heads*context_length*context_length)                        # 3(BNTT)
-    mfu_in_update_v = (2*context_length)*(num_heads*context_length*head_hidden_size)     # (2T)(BNTH)
-    mfu_in_proj_v   = (2*num_heads*head_hidden_size)*(context_length*model_hidden_size)  # (2NH)(BTE)
-    mfu_in_ff       = (2*model_hidden_size)*(4*model_hidden_size*context_length)         # (2E)(4EBT)
+    flop_in_kqv_proj = (2*model_hidden_size)*(3*head_hidden_size*num_heads)               # (2E)(3HNBT)
+    flop_in_kq       = (2*head_hidden_size)*(num_heads*context_length*context_length)     # (2H)(BNTT)
+    flop_in_softmax  = 3*(num_heads*context_length*context_length)                        # 3(BNTT)
+    flop_in_update_v = (2*context_length)*(num_heads*context_length*head_hidden_size)     # (2T)(BNTH)
+    flop_in_proj_v   = (2*num_heads*head_hidden_size)*(context_length*model_hidden_size)  # (2NH)(BTE)
+    flop_in_ff       = (2*model_hidden_size)*(4*model_hidden_size*context_length)         # (2E)(4EBT)
 
-    return num_layers * (mfu_in_kqv_proj+mfu_in_kq+mfu_in_softmax+mfu_in_update_v+mfu_in_proj_v+mfu_in_ff)
+    return num_layers * (flop_in_kqv_proj+flop_in_kq+flop_in_softmax+flop_in_update_v+flop_in_proj_v+flop_in_ff)
