@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 # -- OLCF specific imports
-from maxie.plugins.olcf import init_dist_env_on_summit
+from maxie.plugins.slac import init_dist_env_on_s3df
+## from maxie.plugins.olcf import init_dist_env_on_summit
 
 # -- Basic imports
 import os
@@ -29,6 +30,7 @@ from maxie.datasets.ipc_segmented_dataset_dist import (
 from maxie.utils.seed        import set_seed
 from maxie.utils.misc        import is_action_due
 from maxie.utils.checkpoint  import CheckpointConfig, Checkpoint
+from maxie.utils.flops       import estimate_conv_flops, estimate_transformer_flops
 from maxie.lr_scheduler      import CosineLRScheduler
 from maxie.perf              import Timer
 from maxie.tensor_transforms import (
@@ -252,7 +254,8 @@ signal.signal(signal.SIGTERM, signal_handler)
 # torchrun doesn't work well on OLCF.  Refer to https://docs.olcf.ornl.gov/software/python/pytorch_frontier.html#torchrun
 # Thanks to the suggestion by @frobnitzem
 torchrun_exists = int(os.environ.get("RANK", -1)) != -1
-if not torchrun_exists: init_dist_env_on_summit()
+## if not torchrun_exists: init_dist_env_on_summit()
+if not torchrun_exists: init_dist_env_on_s3df()
 
 # --- Initialize distributed environment
 uses_dist = int(os.environ.get("WORLD_SIZE", 1)) > 1
@@ -365,6 +368,7 @@ world_seed = base_seed + seed_offset
 set_seed(world_seed)
 
 # -- Set up transformation
+merges_batch_patch_dims = uses_polar_center_crop
 pre_transforms = (
     Pad(H_pad, W_pad) if uses_pad else NoTransform(),
 )
@@ -803,45 +807,6 @@ def is_last_batch(batch_idx, num_batches):
     return batch_idx + 1 == num_batches
 
 
-def get_num_params(model):
-    return sum(p.numel() for p in model.parameters())
-
-
-def estimate_mfu_per_iteration(model, total_num_tokens_per_iteration, t_detla, peak_flops_per_sec):
-    """
-    Estimate model flops utilization (MFU) in units of peak FLOPS of the GPUs.
-
-    Flops per transformer block per forward pass per token:
-    - num_params    = 12 * token_embd_size**2
-    - num_flops_fwd = 2 * num_params
-
-    Flops per transformer block per fowrwad and backward pass per token:
-    - num_flops_bwd    = 2 * num_flops_fwd
-    - num_flops_fwdbwd = num_flops_fwd + num_flops_bwd
-                       = 3 * num_flops_fwd
-                       = 6 * num_params
-
-    MAE has two transformers: vit encoder and decoder.  The encoder consumes a
-    fraction of the tokens(patches) as compared with the decoder.
-    """
-    # Flops per token
-    num_params_in_encoder_layers = get_num_params(model.vit.encoder.layer)
-    num_params_in_decoder_layers = get_num_params(model.decoder.decoder_layers)
-
-    num_flops_encoder_per_token = 6 * num_params_in_encoder_layers
-    num_flops_decoder_per_token = 6 * num_params_in_decoder_layers
-
-    # Flops per iteration
-    num_flops_per_iteration = num_flops_encoder_per_token * total_num_tokens_per_iteration * (1 - model.config.mask_ratio) + \
-                              num_flops_decoder_per_token * total_num_tokens_per_iteration
-
-    # MFU per iteration
-    num_flops_per_iteration_per_sec = num_flops_per_iteration / t_detla
-    mfu = num_flops_per_iteration_per_sec / peak_flops_per_sec
-
-    return mfu
-
-
 # ----------------------------------------------------------------------- #
 #  TRAINING LOOP
 # ----------------------------------------------------------------------- #
@@ -910,36 +875,36 @@ try:
                 sampler.set_epoch(epoch)
 
             # [WORKAROUND]
-            # FIXME: Better data cleaning will eliminate None batch
-            if batch_input_shape is None:
-                dist.barrier()
-                object_list = [None, ]
-                if dist_rank == 0:
-                    dataset_eval_train.reset()
-                    dataset_eval_train.set_start_idx(0)
-                    dataloader_eval = torch.utils.data.DataLoader(
-                        dataset_eval_train,
-                        batch_size  = batch_size,
-                        sampler     = None,
-                        num_workers = num_workers,
-                        shuffle     = False,
-                        collate_fn  = custom_collate,
-                    )
-                    dataloader_eval_iter = iter(dataloader_eval)
-                    logger.debug(f"[RANK {dist_rank}] Identifying the shape of batch_data...")
-                    while batch_input_shape is None:
-                        try:
-                            batch_data = next(dataloader_eval_iter)
-                            if batch_data is not None:
-                                batch_input_shape = batch_data.shape
-                                logger.debug(f"[RANK {dist_rank}] Shape of batch_data = {batch_input_shape}")
-                        except StopIteration:
-                            raise ValueError(f"[RANK {dist_rank}] No valid eval data found for obtaining the input shape!!!")
-                            break
-                    object_list = [batch_input_shape, ]
-                if uses_dist:
-                    dist.broadcast_object_list(object_list, src = 0)
-                    batch_input_shape = object_list[0]
+            ## # FIXME: Better data cleaning will eliminate None batch
+            ## if batch_input_shape is None:
+            ##     dist.barrier()
+            ##     object_list = [None, ]
+            ##     if dist_rank == 0:
+            ##         dataset_eval_train.reset()
+            ##         dataset_eval_train.set_start_idx(0)
+            ##         dataloader_eval = torch.utils.data.DataLoader(
+            ##             dataset_eval_train,
+            ##             batch_size  = batch_size,
+            ##             sampler     = None,
+            ##             num_workers = num_workers,
+            ##             shuffle     = False,
+            ##             collate_fn  = custom_collate,
+            ##         )
+            ##         dataloader_eval_iter = iter(dataloader_eval)
+            ##         logger.debug(f"[RANK {dist_rank}] Identifying the shape of batch_data...")
+            ##         while batch_input_shape is None:
+            ##             try:
+            ##                 batch_data = next(dataloader_eval_iter)
+            ##                 if batch_data is not None:
+            ##                     batch_input_shape = batch_data.shape
+            ##                     logger.debug(f"[RANK {dist_rank}] Shape of batch_data = {batch_input_shape}")
+            ##             except StopIteration:
+            ##                 raise ValueError(f"[RANK {dist_rank}] No valid eval data found for obtaining the input shape!!!")
+            ##                 break
+            ##         object_list = [batch_input_shape, ]
+            ##     if uses_dist:
+            ##         dist.broadcast_object_list(object_list, src = 0)
+            ##         batch_input_shape = object_list[0]
 
             # -- Loop over mini batches
             # --- Set up helper variables for gradient accum and reporting
@@ -949,9 +914,10 @@ try:
             num_remainder_batches       = num_batches % grad_accum_steps
             start_idx_remainder_batches = num_batches - num_remainder_batches  # e.g. total=102, steps=5, idx = 102 - 102%5 = 100
 
-            # Aggregate the loss and number of processed tokens during each gradient accumulation
+            # Aggregate the loss and number of processed tokens and batches during each gradient accumulation
             total_loss       = torch.tensor(0.0, device = device)
             total_num_tokens = torch.tensor(0.0, device = device)
+            total_num_batch  = torch.tensor(0.0, device = device)
 
             # Set a timer flag
             starts_timer = True
@@ -1005,6 +971,10 @@ try:
                     num_tokens  = total_numel / token_size
                     total_num_tokens += num_tokens
 
+                    # Accumulate number of batches
+                    num_batch = batch_data.size(0)
+                    total_num_batch += num_batch
+
                     # Backward
                     scaler.scale(loss).backward()
 
@@ -1037,6 +1007,7 @@ try:
                     # Obtain the total number of tokens processed
                     if uses_dist:
                         dist.all_reduce(total_num_tokens, op = dist.ReduceOp.SUM)  # Sum across ranks
+                        dist.all_reduce(total_num_batch , op = dist.ReduceOp.SUM)  # Sum across ranks
 
                     # Wait for all gpus to complete work
                     if device_type == "cuda":
@@ -1051,8 +1022,25 @@ try:
 
                     # Log the training loop loss after a forward/backward/update
                     if dist_rank == 0:
-                        # MFU
-                        mfu_per_iteration = estimate_mfu_per_iteration(model, total_num_tokens, t_delta, peak_flops_per_sec)
+                        # MFU...
+                        # ...Encoder
+                        model_hidden_size = model_config.hidden_size
+                        num_heads         = model_config.num_attention_heads
+                        num_layers        = model_config.num_hidden_layers
+                        image_size        = model_config.image_size
+                        patch_size        = model_config.patch_size
+                        context_length    = (image_size/patch_size)**2
+                        mask_ratio        = model_config.mask_ratio
+                        encoder_flops     = estimate_transformer_flops(model_hidden_size, num_heads, num_layers, context_length*(1-mask_ratio))
+
+                        # ...Decoder
+                        model_hidden_size = model_config.decoder_hidden_size
+                        num_heads         = model_config.decoder_num_attention_heads
+                        num_layers        = model_config.decoder_num_hidden_layers
+                        decoder_flops     = estimate_transformer_flops(model_hidden_size, num_heads, num_layers, context_length)
+
+                        model_flops_per_sec = (encoder_flops+decoder_flops) * total_num_batch / t_delta
+                        mfu = model_flops_per_sec / peak_flops_per_sec
 
                         # Misc
                         current_lrs   = scheduler.get_lr()
@@ -1069,7 +1057,7 @@ try:
                             "grad_norm"          : f"{grad_norm:.6f}",
                             "mean_train_loss"    : f"{total_loss:.6f}",
                             "tokens_per_sec"     : f"{tokens_per_sec:.1e}",
-                            "mfu_per_iteration"  : f"{mfu_per_iteration:.3f}",
+                            "mfu"                : f"{mfu:.3f}",
                             "grad_nosync_counter": grad_nosync_counter,
                         }
                         log_msg = " | ".join([f"{k}={v}" for k, v in log_data.items()])
@@ -1134,8 +1122,9 @@ try:
                     # Reset the loss accumulator
                     total_loss *= 0.0
 
-                    # Reset the token accumulator
+                    # Reset the token and batch accumulator
                     total_num_tokens *= 0
+                    total_num_batch  *= 0
 
                     # Reset timer flag
                     starts_timer = True
