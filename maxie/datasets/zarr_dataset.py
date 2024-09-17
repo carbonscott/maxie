@@ -1,10 +1,13 @@
-import torch
-from torch.utils.data import Dataset
 import os
-import torch.distributed as dist
-from collections import deque
+import math
 import zarr
 import pyarrow.parquet as pq
+
+import torch
+import torch.distributed as dist
+from torch.utils.data import Dataset
+
+from collections import deque
 import logging
 
 logger = logging.getLogger(__name__)
@@ -167,6 +170,10 @@ class DistributedZarrDataset(Dataset):
         """Reset the segment to the initial state."""
         self.start_idx = 0
         self.end_idx = 0
+
+    @property
+    def num_seg(self):
+        return math.ceil(self.total_size / self.global_seg_size)
 
     def save_checkpoint(self, checkpoint_path):
         """
