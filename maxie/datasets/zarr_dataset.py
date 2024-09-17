@@ -29,7 +29,7 @@ class DistributedZarrDataset(Dataset):
         # Initialize dataset components
         self.metadata         = pq.read_table(parquet_file).to_pandas()
         self.cumulative_sizes = torch.cumsum(torch.tensor([eval(shape)[0] for shape in self.metadata['shape']]), dim=0)
-        self.total_images     = self.cumulative_sizes[-1].item()
+        self.total_size       = self.cumulative_sizes[-1].item()
 
         # Initialize segment management components
         self.world_size      = int(os.environ.get("WORLD_SIZE", "1"))
@@ -42,7 +42,7 @@ class DistributedZarrDataset(Dataset):
 
         # Shuffling
         self.generator = torch.Generator().manual_seed(seed)
-        self.index_map = torch.arange(self.total_images)
+        self.index_map = torch.arange(self.total_size)
         self.shuffle()
 
         # Zarr caching
@@ -56,7 +56,7 @@ class DistributedZarrDataset(Dataset):
         """
         Perform a global shuffle of the dataset.
         """
-        rand_idx = torch.randperm(self.total_images, generator=self.generator)
+        rand_idx = torch.randperm(self.total_size, generator=self.generator)
         self.index_map = self.index_map[rand_idx]
         logger.debug(f"Rank {self.rank}: Global shuffle performed")
 
@@ -160,11 +160,11 @@ class DistributedZarrDataset(Dataset):
         Args:
             start_idx (int): The new start index.
         """
-        if start_idx >= self.total_images:
+        if start_idx >= self.total_size:
             self.reset()
         else:
             self.start_idx = start_idx
-            self.end_idx = min(self.start_idx + self.global_seg_size, self.total_images)
+            self.end_idx = min(self.start_idx + self.global_seg_size, self.total_size)
 
     def reset(self):
         """Reset the segment to the initial state."""
@@ -173,7 +173,7 @@ class DistributedZarrDataset(Dataset):
 
     @property
     def num_seg(self):
-        return math.ceil(self.total_images / self.global_seg_size)
+        return math.ceil(self.total_size / self.global_seg_size)
 
     def save_checkpoint(self, checkpoint_path):
         """
@@ -210,7 +210,7 @@ class DistributedZarrDataset(Dataset):
             else:
                 end_idx         = torch.tensor(0, dtype=torch.long)
                 seg_size        = torch.tensor(0, dtype=torch.long)
-                index_map       = torch.zeros(self.total_images, dtype=torch.long)
+                index_map       = torch.zeros(self.total_size, dtype=torch.long)
                 generator_state = torch.empty_like(self.generator.get_state())
 
             dist.broadcast(end_idx        , src=0)
