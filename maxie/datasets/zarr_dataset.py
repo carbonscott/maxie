@@ -173,7 +173,7 @@ class DistributedZarrDataset(Dataset):
 
     @property
     def num_seg(self):
-        return math.ceil(self.total_size / self.global_seg_size)
+        return math.ceil(self.total_images / self.global_seg_size)
 
     def save_checkpoint(self, checkpoint_path):
         """
