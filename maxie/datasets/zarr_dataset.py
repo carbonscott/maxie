@@ -22,7 +22,7 @@ class DistributedZarrDataset(Dataset):
         cache_size   (int, optional): Maximum number of Zarr files to keep in cache. Defaults to 100.
     """
 
-    def __init__(self, parquet_file, seg_size, seed=42, cache_size=100):
+    def __init__(self, parquet_file, seg_size, transforms = None, seed=42, cache_size=100):
         # Initialize ZarrDataset components
         self.metadata = pq.read_table(parquet_file).to_pandas()
         self.cumulative_sizes = torch.cumsum(torch.tensor([eval(shape)[0] for shape in self.metadata['shape']]), dim=0)
@@ -44,6 +44,9 @@ class DistributedZarrDataset(Dataset):
         # Zarr caching
         self.zarr_cache = {}
         self.cache_queue = deque(maxlen=cache_size)
+
+        # Transform
+        self.transforms = transforms
 
     def shuffle(self):
         """
@@ -103,12 +106,14 @@ class DistributedZarrDataset(Dataset):
 
         z = self.zarr_cache[zarr_path]
         image = z['data'][zarr_idx]
-        image_tensor = torch.from_numpy(image).float()
-        if image_tensor.ndim == 2:
-            image_tensor = image_tensor.unsqueeze(0)
+
+        if self.transforms is not None:
+            image_tensor = torch.from_numpy(image[None, None])  # (B=1, C, H, W)
+            for enum_idx, trans in enumerate(self.transforms):
+                image_tensor = trans(image_tensor)
 
         logger.debug(f"Rank {self.rank}: Loaded image from {zarr_path}, index {zarr_idx}")
-        return image_tensor
+        return image_tensor[0]  # (B=1,C,H,W) -> (C,H,W)
 
     def _get_file_and_zarr_indices(self, original_idx):
         """
