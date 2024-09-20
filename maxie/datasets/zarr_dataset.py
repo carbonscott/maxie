@@ -36,6 +36,15 @@ class DistributedZarrDataset(Dataset):
         self.rank            = int(os.environ.get("RANK", "0"))
         self.seg_size        = seg_size
         self.global_seg_size = self.seg_size * self.world_size
+
+        # ...Error handling for seg_size larger than total_size
+        if self.global_seg_size > self.total_size:
+            min_examples = math.ceil(self.total_size / self.world_size)
+            raise ValueError(f"Segment size per rank ({self.seg_size}) is too large. "
+                             f"The total size ({self.total_size}) must be at least "
+                             f"{self.global_seg_size}. Please use a segment size "
+                             f"of {min_examples} or less per rank.")
+
         self.start_idx       = 0
         self.end_idx         = 0
         self.set_start_idx(0)
