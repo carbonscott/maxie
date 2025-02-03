@@ -83,7 +83,6 @@ class TestDistributedUtils:
         # Configure mock for single rank
         mock_mpi.Get_size.return_value = 1
         mock_mpi.Get_rank.return_value = 0
-        # Important: don't broadcast in single rank mode
         mock_mpi.bcast.side_effect = Exception("Should not be called in single rank mode")
 
         init_dist_env()
