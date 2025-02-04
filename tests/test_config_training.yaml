@@ -30,6 +30,7 @@ dataset:
     num_patch: 100
     sampling_fraction: null
     set:
+      uses_instance_norm: false
       batch_sampler: false
       pad: true
       polar_center_crop: false

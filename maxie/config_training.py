@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 class TransformSet(BaseModel):
     pad: bool
+    uses_instance_norm: bool
     random_patch: bool
     random_rotate: bool
     random_shift: bool
