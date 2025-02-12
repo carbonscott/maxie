@@ -18,6 +18,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
     CheckpointImpl,
 )
+from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from ..utils_fsdp import (
     MemoryMaximizer,
     verify_bfloat_support,
@@ -127,7 +128,7 @@ class ModelBuilder:
 
         return mixed_precision, autocast_context, scaler
 
-    def _setup_fsdp_config(self) -> Dict[str, Any]:
+    def _setup_fsdp_config(self, layer_class_to_wrap: type) -> Dict[str, Any]:
         """Configure FSDP settings"""
         # Sharding strategy
         sharding_map = {
@@ -141,14 +142,8 @@ class ModelBuilder:
         wrap_policy = partial(
             transformer_auto_wrap_policy,
             transformer_layer_cls={
-                ViTMAELayer,
+                layer_class_to_wrap,
             },
-        )
-
-        # Activation checkpointing wrapper
-        checkpoint_wrapper_fn = partial(
-            checkpoint_wrapper,
-            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
         )
 
         return {
@@ -156,15 +151,18 @@ class ModelBuilder:
             'backward_prefetch': BackwardPrefetch.BACKWARD_PRE,
             'forward_prefetch': True,
             'sharding_strategy': sharding_strategy,
-            'checkpoint_wrapper_fn': checkpoint_wrapper_fn,
         }
 
-    def _apply_activation_checkpointing(self, model: nn.Module):
+    def _apply_activation_checkpointing(self,
+            model: nn.Module,
+            layer_class_to_checkpoint: type,
+            checkpoint_wrapper_fn: Callable
+        ):
         """Apply activation checkpointing to transformer layers"""
-        check_fn = lambda submodule: isinstance(submodule, ViTMAELayer)
+        check_fn = lambda submodule: isinstance(submodule, layer_class_to_checkpoint)
         apply_activation_checkpointing(
             model,
-            checkpoint_wrapper_fn=self._setup_fsdp_config()['checkpoint_wrapper_fn'],
+            checkpoint_wrapper_fn=checkpoint_wrapper_fn,
             check_fn=check_fn
         )
 
@@ -176,6 +174,10 @@ class ModelBuilder:
         # Create model instance
         model_config = ViTMAEConfig(**self.config.model.hf_config)
         model = ViTMAEForPreTraining(model_config)
+
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                param.requires_grad = True
 
         # Handle pre-FSDP checkpoint loading if needed
         path_chkpt_prev = self.config.checkpoint.path_chkpt_prev
@@ -206,7 +208,7 @@ class ModelBuilder:
 
         # Configure FSDP
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        fsdp_config = self._setup_fsdp_config()
+        fsdp_config = self._setup_fsdp_config(ViTMAELayer)
 
         model = FSDP(
             model,
@@ -218,7 +220,15 @@ class ModelBuilder:
         )
 
         # Apply activation checkpointing
-        self._apply_activation_checkpointing(model)
+        checkpoint_wrapper_fn = partial(
+            checkpoint_wrapper,
+            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+        )
+        self._apply_activation_checkpointing(
+            model,
+            layer_class_to_checkpoint=ViTMAELayer,
+            checkpoint_wrapper_fn=checkpoint_wrapper_fn,
+        )
 
         # Log sharded parameter count
         if self.dist_env['rank'] == 0:
