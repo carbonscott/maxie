@@ -118,7 +118,7 @@ class DistributedSegmentedDummyData(Dataset):
 
         return requires_reset
 
-class DataManager:
+class DatasetManager:
     """Manages dataset creation and transformations for training and evaluation"""
 
     def __init__(self, config: 'TrainingConfig', dist_env: dict):
