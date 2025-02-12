@@ -57,10 +57,10 @@ def init_dist_env():
           f"MASTER_PORT={os.environ['MASTER_PORT']}")
 
 def setup_distributed(config):
-    dist_config = config.get("dist")
-    dist_backend = dist_config.get("backend")
-    uses_unique_world_seed = dist_config.get("uses_unique_world_seed")
-    dist_dtype = dist_config.get("dtype")
+    dist_config = config.dist
+    dist_backend = dist_config.backend
+    uses_unique_world_seed = dist_config.uses_unique_world_seed
+    dist_dtype = dist_config.dtype
 
     init_dist_env()
     uses_dist = int(os.environ.get("WORLD_SIZE", 1)) > 1
