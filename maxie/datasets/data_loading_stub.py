@@ -25,6 +25,9 @@ class TransformationPipeline(BaseModel):
     transforms: Tuple = ()
     merges_batch_patch_dims: bool = False
 
+    class Config:
+        arbitrary_types_allowed = True
+
 class DummyDataConfig(BaseModel):
     """Configuration for dummy dataset"""
     C: int
@@ -36,6 +39,9 @@ class DummyDataConfig(BaseModel):
     dist_world_size: int = 1
     transforms: Optional[Union[List, Tuple]] = None
     dtype: torch.dtype = torch.float32
+
+    class Config:
+        arbitrary_types_allowed = True
 
 class DistributedSegmentedDummyData(Dataset):
     """Dummy dataset that mimics distributed segmented data loading"""
@@ -50,6 +56,9 @@ class DistributedSegmentedDummyData(Dataset):
         self.start_idx = 0
         self.end_idx = 0
         self.current_dataset = None
+
+        # Initialize the first segment
+        self.set_start_idx(0)
 
     def reset(self):
         """Reset dataset state"""
