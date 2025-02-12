@@ -1,0 +1,95 @@
+checkpoint:
+  state_dict_type: full
+  chkpt_saving_iterations: null
+  preempt_metadata_path: null
+  preempt_chkpt_saving_iterations: null
+  directory: experiments/chkpts
+  prefix: dummy-0.1
+  path_chkpt_prev: null
+  pretrain: null
+dataset:
+  batch_size: 4
+  cache_size: 16
+  debug: false
+  drop_last_in_loader: true
+  drop_last_in_sampler: true
+  num_workers: 2
+  path_train: experiments/datasets/safetensor_dataset.train.csv
+  path_eval: experiments/datasets/safetensor_dataset.validate.csv
+  pin_memory: true
+  prefetch_factor: 16
+  seg_size: 240
+  transforms:
+    H_pad: 1920
+    Hv: 256
+    W_pad: 1920
+    Wv: 256
+    angle_max: 360
+    frac_shift_max: 0.1
+    num_crop: 8
+    num_patch: 100
+    sampling_fraction: null
+    set:
+      uses_instance_norm: false
+      batch_sampler: false
+      pad: true
+      polar_center_crop: false
+      random_patch: false
+      random_rotate: false
+      random_shift: false
+    sigma: 0.333
+    size_patch: 20
+    var_size_patch: 0.2
+dist:
+  backend: nccl
+  uses_unique_world_seed: true
+  dtype: bfloat16
+logging:
+  directory: experiments/logs
+  prefix: dummy-0.1
+  level: debug
+loss:
+  grad_accum_steps: 10
+lr_scheduler:
+  min_lr: 1.0e-07
+  total_iterations: 1000000
+  warmup_iterations: 10
+  scheduler_update_iterations: 1
+misc:
+  max_epochs: 5
+  max_eval_iter: 10
+  max_eval_retry: 2
+  sharding_stage: zero3
+  compiles_model: false
+  data_dump_on: false
+  peak_flops_per_sec: 312000000000000
+  monitors_dynamics: false
+model:
+  hf_config:
+    hidden_size: 1280
+    num_hidden_layers: 32
+    num_attention_heads: 16
+    intermediate_size: 5120
+    hidden_act: gelu
+    hidden_dropout_prob: 0.0
+    attention_probs_dropout_prob: 0.0
+    initializer_range: 0.02
+    layer_norm_eps: 1.0e-12
+    image_size: 252
+    patch_size: 14
+    num_channels: 1
+    qkv_bias: true
+    decoder_num_attention_heads: 16
+    decoder_hidden_size: 512
+    decoder_num_hidden_layers: 8
+    decoder_intermediate_size: 2048
+    mask_ratio: 0.75
+    norm_pix_loss: false
+  from_scratch: false
+optim:
+  grad_clip: 1.0
+  lr: 0.0003
+  weight_decay: 0.05
+  beta1: 0.9
+  beta2: 0.95
+  fused: false
