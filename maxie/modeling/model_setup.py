@@ -18,6 +18,13 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
     CheckpointImpl,
 )
+from ..utils_fsdp import (
+    MemoryMaximizer,
+    verify_bfloat_support,
+    FullStateDictCheckpoint,
+    ShardedStateDictCheckpoint,
+)
+from ..utils.checkpoint import Checkpoint
 from transformers.models.vit_mae.configuration_vit_mae import ViTMAEConfig
 from transformers.models.vit_mae.modeling_vit_mae import (
     ViTMAEForPreTraining,
