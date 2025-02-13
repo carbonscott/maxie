@@ -86,5 +86,6 @@ def setup_distributed(config):
         'local_rank': dist_local_rank,
         'world_size': dist_world_size,
         'backend': dist_backend,
-        'dtype': dist_dtype
+        'dtype': dist_dtype,
+        'device': f'cuda:{dist_local_rank}' if not config.misc.cpu_only and torch.cuda.is_available() else 'cpu'
     }

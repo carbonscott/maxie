@@ -680,39 +680,73 @@ class ShardedStateDictCheckpoint:
 # ----------------------------------------------------------------------- #
 #  Logger
 # ----------------------------------------------------------------------- #
-def init_logger(uses_dist, dist_rank, device, fl_prefix = None, drc_log = "logs", level = 'info'):
-    timestamp = None
+def sync_timestamp(rank, device):
+    """
+    Synchronize timestamp string across ranks using torch distributed.
+    Format: "YYYY_MMDD_HHMM_SS"
+    """
+    # Create tensor to store timestamp string (as ASCII codes)
+    # Format "2025_0212_1339_59" is 16 characters
+    timestamp_tensor = torch.zeros(16, dtype=torch.uint8, device=device)
 
-    if dist_rank == 0:
-        # Create a timestamp to name the log file...
-        now = datetime.now()
-        timestamp = now.strftime("%Y_%m%d_%H%M_%S")
+    if rank == 0:
+        # Only rank 0 generates the timestamp
+        timestamp_str = datetime.now().strftime("%Y_%m%d_%H%M_%S")
+        timestamp_tensor = torch.tensor([ord(c) for c in timestamp_str], dtype=torch.uint8, device=device)
 
+    # Broadcast the timestamp from rank 0 to all ranks
+    dist.broadcast(timestamp_tensor, src=0)
+
+    # Convert back to string
+    return ''.join([chr(i) for i in timestamp_tensor.tolist()])
+
+def init_logger(uses_dist, dist_rank, device, fl_prefix=None, drc_log="logs", level='info'):
+    """
+    Initialize logger with synchronized timestamp across distributed processes.
+
+    Args:
+        uses_dist (bool): Whether distributed processing is being used
+        dist_rank (int): Rank of current process
+        device (torch.device): Device to use for timestamp synchronization
+        fl_prefix (str, optional): Prefix for log filename
+        drc_log (str, optional): Directory for log files
+        level (str, optional): Logging level ('info' or 'debug')
+
+    Returns:
+        str: Synchronized timestamp string
+    """
+    # Generate and synchronize timestamp
     if uses_dist:
-        timestamp = broadcast_dict(dict(timestamp=timestamp), src = 0, device = device).get('timestamp')
+        timestamp = sync_timestamp(dist_rank, device)
+    else:
+        timestamp = datetime.now().strftime("%Y_%m%d_%H%M_%S")
 
     # Set up the log file...
     # ...base directory
     base_log = f"{timestamp}"
-    if fl_prefix is not None: base_log = f"{fl_prefix}.{base_log}"
+    if fl_prefix is not None:
+        base_log = f"{fl_prefix}.{base_log}"
     path_log = os.path.join(drc_log, base_log)
 
     # ...path
-    os.makedirs(path_log, exist_ok = True)
+    os.makedirs(path_log, exist_ok=True)
     fl_log = f"rank{dist_rank}.log"
     path_log = os.path.join(path_log, fl_log)
 
     # Config logging behaviors
     log_level_spec = {
-        "info"  : logging.INFO,
-        "debug" : logging.DEBUG,
+        "info": logging.INFO,
+        "debug": logging.DEBUG,
     }
     log_level = log_level_spec.get(level, logging.INFO)
-    logging.basicConfig( filename = path_log,
-                         filemode = 'w',
-                         format="%(asctime)s %(levelname)s %(name)s\n%(message)s",
-                         datefmt="%m/%d/%Y %H:%M:%S",
-                         level=log_level, )
-    logger = logging.getLogger(__name__)
 
+    logging.basicConfig(
+        filename=path_log,
+        filemode='w',
+        format="%(asctime)s %(levelname)s %(name)s\n%(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=log_level,
+    )
+
+    logger = logging.getLogger(__name__)
     return timestamp

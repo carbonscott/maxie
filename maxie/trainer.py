@@ -3,18 +3,18 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple, Union
 from dataclasses import dataclass
 from contextlib import nullcontext
 import tqdm
 import time
 
-from maxie.lr_scheduler import CosineLRScheduler
-from maxie.utils.monitor import ActivationMonitor, monitor_param_update_metrics
-from maxie.utils.misc import is_action_due
-from maxie.config_training import TrainingConfig
-from maxie.utils.checkpoint import CheckpointConfig, Checkpoint
-from maxie.utils_fsdp import (
+from .lr_scheduler import CosineLRScheduler
+from .utils.monitor import ActivationMonitor, monitor_param_update_metrics
+from .utils.misc import is_action_due
+from .config_training import TrainingConfig
+from .utils.checkpoint import Checkpoint
+from .utils_fsdp import (
     FullStateDictCheckpoint,
     ShardedStateDictCheckpoint,
 )
@@ -35,6 +35,7 @@ class Trainer:
                  dist_env: Dict[str, Any],
                  model_wrapper: 'ModelWrapper',
                  dataset_manager: 'DatasetManager',
+                 checkpointer: Union[Checkpoint, FullStateDictCheckpoint, ShardedStateDictCheckpoint],
                  timestamp: str):
         """
         Initialize trainer with configuration and components
@@ -51,8 +52,11 @@ class Trainer:
         self.model = model_wrapper.model
         self.model_wrapper = model_wrapper
         self.dataset_manager = dataset_manager
-        self.device = f'cuda:{dist_env["local_rank"]}' if not config.misc.cpu_only and torch.cuda.is_available() else 'cpu'
+        self.checkpointer = checkpointer
         self.timestamp = timestamp
+
+        # Device
+        self.device = dist_env.get('device')
 
         # Training state
         self.state = TrainingState()
@@ -63,10 +67,6 @@ class Trainer:
         self._setup_checkpointing()
 
     def _setup_checkpointing(self):
-        """Initialize checkpoint-related components"""
-        # Checkpointer now comes from model_wrapper
-        self.checkpointer = self.model_wrapper.checkpointer
-
         # Load checkpoint if path is provided
         path_chkpt_prev = self.config.checkpoint.path_chkpt_prev
         if path_chkpt_prev:

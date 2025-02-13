@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Dict, Any, Callable, Union
 import logging
 import torch
 import torch.nn as nn
@@ -26,6 +26,7 @@ from ..utils_fsdp import (
     ShardedStateDictCheckpoint,
 )
 from ..utils.checkpoint import Checkpoint
+from ..utils.checkpoint_setup import create_checkpointer
 from transformers.models.vit_mae.configuration_vit_mae import ViTMAEConfig
 from transformers.models.vit_mae.modeling_vit_mae import (
     ViTMAEForPreTraining,
@@ -49,17 +50,11 @@ class ModelWrapper:
 class ModelBuilder:
     """Handles model initialization and FSDP setup"""
 
-    def __init__(self, config: 'TrainingConfig', dist_env: Dict[str, Any]):
+    def __init__(self, config: 'TrainingConfig', dist_env: Dict[str, Any], checkpointer: Union[Checkpoint, FullStateDictCheckpoint, ShardedStateDictCheckpoint]):
         self.config = config
         self.dist_env = dist_env
-        self.device = f'cuda:{dist_env["local_rank"]}' if not config.misc.cpu_only and torch.cuda.is_available() else 'cpu'
-
-        # Initialize checkpointer early for pre-FSDP loading
-        checkpoint_func = {
-            "full": FullStateDictCheckpoint,
-            "sharded": ShardedStateDictCheckpoint,
-        }[config.checkpoint.state_dict_type] if dist_env['uses_dist'] else Checkpoint
-        self.checkpointer = checkpoint_func()
+        self.device = dist_env['device']
+        self.checkpointer = checkpointer
 
     def _patch_model_weights(self):
         """Patch model weight initialization methods"""
@@ -237,7 +232,7 @@ class ModelBuilder:
 
         return ModelWrapper(model, mixed_precision, autocast_context, scaler)
 
-def setup_model(config: 'TrainingConfig', dist_env: Dict[str, Any]) -> ModelWrapper:
+def setup_model(config: 'TrainingConfig', dist_env: Dict[str, Any], checkpointer: Union[Checkpoint, FullStateDictCheckpoint, ShardedStateDictCheckpoint]) -> ModelWrapper:
     """Main entry point for model setup"""
-    builder = ModelBuilder(config, dist_env)
+    builder = ModelBuilder(config, dist_env, checkpointer)
     return builder.build()
