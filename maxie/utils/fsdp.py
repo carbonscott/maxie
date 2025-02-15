@@ -34,6 +34,24 @@ from torch.distributed.fsdp.api import (
     ShardedOptimStateDictConfig,
 )
 
+
+from torch.distributed.fsdp import (
+    ShardingStrategy,
+    BackwardPrefetch,
+)
+
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    apply_activation_checkpointing,
+    checkpoint_wrapper,
+    CheckpointImpl,
+)
+
+from torch.distributed.fsdp.wrap import (
+    transformer_auto_wrap_policy,
+)
+
+from functools import partial
+
 # -- Imports for understanding package versions
 from pkg_resources import packaging
 from packaging import version
@@ -757,3 +775,43 @@ def init_logger(uses_dist, dist_rank, device, fl_prefix=None, drc_log="logs", le
         logger.addHandler(console_handler)
 
     return timestamp
+
+
+# -- FSDP policy
+# --- Sharding strategy
+def set_sharding_strategy(sharding_stage):
+    sharding_strategy = dict(
+        zero3 = ShardingStrategy.FULL_SHARD,
+        zero2 = ShardingStrategy.SHARD_GRAD_OP,
+        zero0 = ShardingStrategy.NO_SHARD,
+    )[sharding_stage]
+    return sharding_strategy
+
+# --- Wrapping strategy
+# ---- Use built-in transformer wrap policy
+def fsdp_wrapped_layers(layer_cls):
+    auto_wrap_policy = partial(
+        transformer_auto_wrap_policy,
+        transformer_layer_cls=layer_cls, # layer_cls = {layer,}
+    )
+    return auto_wrap_policy
+
+# --- Backward prefetch policy
+def backward_prefetch():
+    backward_prefetch = BackwardPrefetch.BACKWARD_PRE
+    return backward_prefetch
+
+# -- Apply activation checkpointing
+def act_chkpt(model, ac_layer):
+    non_reentrant_wrapper = partial(
+        checkpoint_wrapper,
+        ## offload_to_cpu  = False,
+        checkpoint_impl = CheckpointImpl.NO_REENTRANT,
+    )
+    if ac_layer is not None:
+        check_fn = lambda submodule: isinstance(submodule, ac_layer)
+        apply_activation_checkpointing(
+            model,
+            checkpoint_wrapper_fn = non_reentrant_wrapper,
+            check_fn              = check_fn
+        )
