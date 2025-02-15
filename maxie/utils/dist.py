@@ -16,6 +16,7 @@ import socket
 import torch
 import torch.distributed as dist
 from datetime import timedelta
+from omegaconf import OmegaConf
 from mpi4py import MPI
 
 def init_dist_env():
@@ -55,6 +56,46 @@ def init_dist_env():
           f"LOCAL_RANK={os.environ['LOCAL_RANK']}, "
           f"MASTER_ADDR={os.environ['MASTER_ADDR']}, "
           f"MASTER_PORT={os.environ['MASTER_PORT']}")
+
+def dist_setup(cpu_only, dist_backend='nccl'):
+    # -- DIST init
+    # --- OLCF specific env
+    # torchrun doesn't work well on OLCF.  Refer to https://docs.olcf.ornl.gov/software/python/pytorch_frontier.html#torchrun
+    # Thanks to the suggestion by @frobnitzem
+    torchrun_exists = int(os.environ.get("RANK", -1)) != -1
+    if not torchrun_exists: init_dist_env()
+
+    # --- Initialize distributed environment
+    uses_dist = int(os.environ.get("WORLD_SIZE", 1)) > 1
+    if uses_dist:
+        rank       = int(os.environ["RANK"      ])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        dist.init_process_group(backend     = dist_backend,
+                                rank        = rank,
+                                world_size  = world_size,
+                                timeout     = timedelta(seconds = 1800),
+                                init_method = "env://",)
+        print(f"RANK:{rank},LOCAL_RANK:{local_rank},WORLD_SIZE:{world_size}")
+    else:
+        rank       = 0
+        local_rank = 0
+        world_size = 1
+        print(f"NO distributed environment is required.  RANK:{rank},LOCAL_RANK:{local_rank},WORLD_SIZE:{world_size}")
+
+    # --- Set up GPU device
+    gpu_idx = local_rank % torch.cuda.device_count()    # local_rank is node-centric, whereas torch.cuda.device_count() is resource-centeric (on LSF)
+    device = f'cuda:{gpu_idx}' if not cpu_only and torch.cuda.is_available() else 'cpu'
+    if device != 'cpu': torch.cuda.set_device(device)
+    return OmegaConf.create(
+        dict(
+            uses_dist=uses_dist,
+            rank=rank,
+            local_rank=local_rank,
+            world_size=world_size,
+            device=device,
+        )
+    )
 
 def setup_distributed(config):
     dist_config = config.dist
