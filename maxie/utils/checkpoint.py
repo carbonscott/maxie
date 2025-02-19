@@ -106,14 +106,14 @@ class Checkpoint:
         if iter_state is not None:
             self.save_iter_state_checkpoint(rank, iter_state, path_checkpoint_iter_state)
 
-    def pre_fsdp_load(self, rank, model, path_checkpoint):
+    def pre_dp_load(self, rank, model, path_checkpoint):
         """
         Only the model needs to be loaded pre FSDP wrapper.
         """
         path_checkpoint_model = os.path.join(path_checkpoint, self.MODEL_STATE_DICT_FILE)
         self.load_model_checkpoint(rank, model, path_checkpoint_model)
 
-    def post_fsdp_load(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
+    def post_dp_load(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
         """
         Users have to pass in the current model, optimizer, lr_scheduler and
         training state so that the checkpointer has the best knowledge of the
@@ -318,7 +318,7 @@ class FullStateDictCheckpoint:
         if iter_state is not None:
             self.save_iter_state_checkpoint(rank, iter_state, path_checkpoint_iter_state)
 
-    def pre_fsdp_load(self, rank, model, path_checkpoint):
+    def pre_dp_load(self, rank, model, path_checkpoint):
         """
         Only the model needs to be loaded pre FSDP wrapper.
         """
@@ -327,7 +327,7 @@ class FullStateDictCheckpoint:
 
         dist.barrier()
 
-    def post_fsdp_load(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
+    def post_dp_load(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
         """
         Users have to pass in the current model, optimizer, lr_scheduler and
         training state so that the checkpointer has the best knowledge of the
@@ -549,10 +549,10 @@ class ShardedStateDictCheckpoint:
         if iter_state is not None:
             self.load_iter_state_checkpoint(rank, iter_state, path_checkpoint_iter_state)
 
-    def pre_fsdp_load(self, rank, model, path_checkpoint):
+    def pre_dp_load(self, rank, model, path_checkpoint):
         pass
 
-    def post_fsdp_load(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
+    def post_dp_load(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
         self.load(rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint)
 
 def init_checkpointer(state_dict_type, uses_dist):
