@@ -301,7 +301,7 @@ def set_sharding_strategy(sharding_stage):
 
 # --- Wrapping strategy
 # ---- Use built-in transformer wrap policy
-def fsdp_wrapped_layers(layer_cls):
+def shard_layers(layer_cls):
     auto_wrap_policy = partial(
         transformer_auto_wrap_policy,
         transformer_layer_cls=layer_cls, # layer_cls = {layer,}
