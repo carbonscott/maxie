@@ -17,10 +17,15 @@ import torch
 import torch.distributed as dist
 from datetime import timedelta
 from omegaconf import OmegaConf
-from mpi4py import MPI
+import sys
 
-def init_dist_env():
+def init_dist_env_with_mpi():
     """Initialize distributed environment using MPI."""
+    try:
+        from mpi4py import MPI
+    except ImportError:
+        raise RuntimeError("mpi4py is not found!!!")
+
     # Use mpi4py to get rank and size information
     mpi_comm = MPI.COMM_WORLD
     mpi_rank = mpi_comm.Get_rank()
@@ -57,13 +62,40 @@ def init_dist_env():
           f"MASTER_ADDR={os.environ['MASTER_ADDR']}, "
           f"MASTER_PORT={os.environ['MASTER_PORT']}")
 
+def init_dist_env_with_srun():
+    uses_dist = int(os.environ.get('SLURM_NTASKS',1)) > 1
+    os.environ['WORLD_SIZE'] = os.environ['SLURM_NTASKS'] if uses_dist else "1"
+    os.environ['RANK'] = os.environ['SLURM_PROCID'] if uses_dist else "0"
+    os.environ['LOCAL_RANK'] = os.environ['SLURM_LOCALID'] if uses_dist else "0"
+    os.environ["MASTER_PORT"] = os.getenv("MASTER_PORT", "29500")
+    if "MASTER_ADDR" not in os.environ:
+        if uses_dist:
+            raise RuntimeError(
+                "Error: MASTER_ADDR environment variable is not set.\n"
+                "Please set it before launching with srun using:\n"
+                "    export MASTER_ADDR=$(hostname)"
+            )
+        else:
+            os.environ["MASTER_ADDR"] = "127.0.0.1"
+    print(f"Environment setup for distributed computation: "
+          f"WORLD_SIZE={os.environ['WORLD_SIZE']}, "
+          f"RANK={os.environ['RANK']}, "
+          f"LOCAL_RANK={os.environ['LOCAL_RANK']}, "
+          f"MASTER_ADDR={os.environ['MASTER_ADDR']}, "
+          f"MASTER_PORT={os.environ['MASTER_PORT']}")
+
 def dist_setup(cpu_only, dist_backend='nccl'):
     # -- DIST init
     # --- OLCF specific env
     # torchrun doesn't work well on OLCF.  Refer to https://docs.olcf.ornl.gov/software/python/pytorch_frontier.html#torchrun
     # Thanks to the suggestion by @frobnitzem
-    torchrun_exists = int(os.environ.get("RANK", -1)) != -1
-    if not torchrun_exists: init_dist_env()
+    is_rank_setup = int(os.environ.get("RANK", -1)) != -1
+    if not is_rank_setup:
+        is_srun_used = int(os.environ.get('SLURM_NTASKS',-1)) != -1
+        if is_srun_used:
+            init_dist_env_with_srun()
+        else:
+            init_dist_env_with_mpi()
 
     # --- Initialize distributed environment
     uses_dist = int(os.environ.get("WORLD_SIZE", 1)) > 1
