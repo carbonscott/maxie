@@ -555,10 +555,10 @@ class ShardedStateDictCheckpoint:
     def post_dp_load(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
         self.load(rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint)
 
-def init_checkpointer(state_dict_type, uses_dist):
+def init_checkpointer(state_dict_type, uses_fsdp):
     checkpoint_func = {
         "full"    : FullStateDictCheckpoint,
         "sharded" : ShardedStateDictCheckpoint,
-    }[state_dict_type] if uses_dist else Checkpoint
+    }[state_dict_type] if uses_fsdp else Checkpoint
     checkpointer = checkpoint_func()
     return checkpointer
