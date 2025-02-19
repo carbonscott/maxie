@@ -46,18 +46,39 @@ class Checkpoint:
 
     def save_model_checkpoint(self, rank, model, path_checkpoint_model):
         if rank == 0:
-            model_state_dict = model.state_dict()
+            model_state_dict = model.module.state_dict() if dist.is_initialized() else model.state_dict()
             torch.save(model_state_dict, path_checkpoint_model)
 
     def load_model_checkpoint(self, rank, model, path_checkpoint_model):
         """
         Must run before FSDP wrapper.
         """
-        model_state_dict = torch.load(path_checkpoint_model)
+        if dist.is_initialized():
+            dist.barrier()
+
+        object_list = [None, ]  # For the use of dist.broadcast_object_list
+        if rank == 0:
+            model_state_dict = torch.load(path_checkpoint_model, map_location='cpu')
+            object_list = [model_state_dict,]
+
+        if dist.is_initialized():
+            dist.broadcast_object_list(object_list, src = 0)
+
+        model_state_dict = object_list[0]
         model.load_state_dict(model_state_dict)
 
     def load_optimizer_checkpoint(self, rank, model, optimizer, path_checkpoint_optim):
-        full_optim_state_dict = torch.load(path_checkpoint_optim)
+        if dist.is_initialized():
+            dist.barrier()
+
+        object_list = [None, ]  # For the use of dist.broadcast_object_list
+        if rank == 0:
+            full_optim_state_dict = torch.load(path_checkpoint_optim, map_location='cpu')
+            object_list = [full_optim_state_dict, ]
+
+        if dist.is_initialized():
+            dist.broadcast_object_list(object_list, src = 0)
+        full_optim_state_dict = object_list[0]
         optimizer.load_state_dict(full_optim_state_dict)
 
     def save_optimizer_checkpoint(self, rank, model, optimizer, path_checkpoint_optim):
@@ -65,17 +86,23 @@ class Checkpoint:
             optim_state_dict = optimizer.state_dict()
             torch.save(optim_state_dict, path_checkpoint_optim)
 
-    ## def load_optimizer_checkpoint(self, rank, model, optimizer, path_checkpoint_optim):
-    ##     optim_state_dict = torch.load(path_checkpoint_optim)
-    ##     optimizer.load_state_dict(optim_state_dict)
-
     def save_lr_checkpoint(self, rank, lr_scheduler, path_checkpoint_lr):
         if rank == 0:
             lr_state_dict = lr_scheduler.state_dict()
             torch.save(lr_state_dict, path_checkpoint_lr)
 
     def load_lr_checkpoint(self, rank, lr_scheduler, path_checkpoint_lr):
-        lr_state_dict = torch.load(path_checkpoint_lr, map_location = 'cpu')
+        if dist.is_initialized():
+            dist.barrier()
+
+        object_list = [None, ]  # For the use of dist.broadcast_object_list
+        if rank == 0:
+            lr_state_dict = torch.load(path_checkpoint_lr, map_location = 'cpu')
+            object_list = [lr_state_dict, ]
+
+        if dist.is_initialized():
+            dist.broadcast_object_list(object_list, src = 0)
+        lr_state_dict = object_list[0]
         lr_scheduler.load_state_dict(lr_state_dict)
 
     def save_iter_state_checkpoint(self, rank, iter_state, path_checkpoint_iter_state):
@@ -83,7 +110,17 @@ class Checkpoint:
             torch.save(iter_state, path_checkpoint_iter_state)
 
     def load_iter_state_checkpoint(self, rank, iter_state, path_checkpoint_iter_state):
-        iter_state_saved = torch.load(path_checkpoint_iter_state, map_location = 'cpu')
+        if dist.is_initialized():
+            dist.barrier()
+
+        object_list = [None, ]  # For the use of dist.broadcast_object_list
+        if rank == 0:
+            iter_state_saved = torch.load(path_checkpoint_iter_state, map_location = 'cpu')
+            object_list = [iter_state_saved, ]
+
+        if dist.is_initialized():
+            dist.broadcast_object_list(object_list, src = 0)
+        iter_state_saved = object_list[0]
         iter_state.clear()
         iter_state.update(iter_state_saved)
 
@@ -132,7 +169,8 @@ class Checkpoint:
         if iter_state is not None:
             self.load_iter_state_checkpoint(rank, iter_state, path_checkpoint_iter_state)
 
-        dist.barrier()
+        if dist.is_initialized():
+            dist.barrier()
 
     def load(self, rank, model, optimizer, lr_scheduler, iter_state, path_checkpoint):
         path_checkpoint_model      = os.path.join(path_checkpoint, self.MODEL_STATE_DICT_FILE)
