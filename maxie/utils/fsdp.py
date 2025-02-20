@@ -294,7 +294,9 @@ def broadcast_dict(obj, src=0, device = 'cpu'):
 def set_sharding_strategy(sharding_stage):
     sharding_strategy = dict(
         zero3 = ShardingStrategy.FULL_SHARD,
+        zero3_hybrid = ShardingStrategy.HYBRID_SHARD,
         zero2 = ShardingStrategy.SHARD_GRAD_OP,
+        zero2_hybrid = ShardingStrategy._HYBRID_SHARD_ZERO2,
         zero0 = ShardingStrategy.NO_SHARD,
     )[sharding_stage]
     return sharding_strategy
