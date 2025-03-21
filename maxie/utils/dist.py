@@ -19,7 +19,7 @@ from datetime import timedelta
 from omegaconf import OmegaConf
 import sys
 
-def init_dist_env_with_mpi():
+def init_dist_env_with_mpi(device_per_node=None):
     """Initialize distributed environment using MPI."""
     try:
         from mpi4py import MPI
@@ -32,7 +32,7 @@ def init_dist_env_with_mpi():
     mpi_size = mpi_comm.Get_size()
 
     # Calculate local rank based on the available GPUs
-    mpi_local_rank = mpi_rank % torch.cuda.device_count()
+    mpi_local_rank = mpi_rank % device_per_node
 
     # Are we using multiple ranks?
     uses_dist = mpi_size > 1
@@ -84,18 +84,20 @@ def init_dist_env_with_srun():
           f"MASTER_ADDR={os.environ['MASTER_ADDR']}, "
           f"MASTER_PORT={os.environ['MASTER_PORT']}")
 
-def dist_setup(cpu_only, dist_backend='nccl'):
+def dist_setup(cpu_only, device_per_node=1, dist_backend='nccl'):
     # -- DIST init
     # --- OLCF specific env
     # torchrun doesn't work well on OLCF.  Refer to https://docs.olcf.ornl.gov/software/python/pytorch_frontier.html#torchrun
     # Thanks to the suggestion by @frobnitzem
     is_rank_setup = int(os.environ.get("RANK", -1)) != -1
+    if device_per_node is None:
+        device_per_node = torch.cuda.device_count()
     if not is_rank_setup:
         is_srun_used = int(os.environ.get('SLURM_NTASKS',-1)) != -1
         if is_srun_used:
             init_dist_env_with_srun()
         else:
-            init_dist_env_with_mpi()
+            init_dist_env_with_mpi(device_per_node)
 
     # --- Initialize distributed environment
     uses_dist = int(os.environ.get("WORLD_SIZE", 1)) > 1
@@ -116,7 +118,7 @@ def dist_setup(cpu_only, dist_backend='nccl'):
         print(f"NO distributed environment is required.  RANK:{rank},LOCAL_RANK:{local_rank},WORLD_SIZE:{world_size}")
 
     # --- Set up GPU device
-    gpu_idx = local_rank % torch.cuda.device_count()    # local_rank is node-centric, whereas torch.cuda.device_count() is resource-centeric (on LSF)
+    gpu_idx = local_rank % device_per_node    # local_rank is node-centric, whereas torch.cuda.device_count() is resource-centeric (on LSF)
     device = f'cuda:{gpu_idx}' if not cpu_only and torch.cuda.is_available() else 'cpu'
     if device != 'cpu': torch.cuda.set_device(device)
     return OmegaConf.create(

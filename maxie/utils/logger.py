@@ -85,7 +85,7 @@ def init_logger(uses_dist, dist_rank, device, fl_prefix=None, drc_log="logs", le
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
 
-    return timestamp
+    return timestamp, logger
 
 
 
