@@ -1,8 +1,8 @@
 import torch
 from torch.utils.data import IterableDataset
 import torch.multiprocessing as mp
-from dataclasses import dataclass
-from typing import Optional, Union, List, Tuple
+from dataclasses import dataclass, field
+from typing import Optional, Union, List, Tuple, Dict
 import io
 import numpy as np
 from pynng import Pull0, Timeout
@@ -16,6 +16,10 @@ import os
 import pathlib
 import uuid
 import socket
+import json
+import yaml
+import math
+from collections import Counter
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +31,8 @@ class StreamingDataConfig:
     address: Optional[str] = None               # Single address (legacy support)
     addresses: List[str] = None                 # List of addresses to pull data from
     address_assignment: str = "round-robin"     # How to assign addresses to nodes
-    node_address_map: dict = None               # Explicit node->address mapping
+    node_address_map: Dict[int, List[str]] = None  # Explicit node->address mapping
+    sockets_per_node: int = 1                   # Number of sockets per node (for multi-socket approaches)
     queue_size: int = 128                       # Size of shared queue
     timeout_ms: int = 1000                      # Socket timeout in milliseconds
     max_wait_time: int = 60                     # Max time to wait if queue is empty (seconds)
@@ -54,39 +59,235 @@ class StreamingDataConfig:
         if self.node_address_map is None:
             self.node_address_map = {}
 
-    def get_address_for_node(self, node_id):
-        """Determine which address this node should connect to"""
+        # Validate the number of sockets per node
+        if self.sockets_per_node <= 0:
+            raise ValueError("sockets_per_node must be greater than 0")
+
+        # Validate the address_assignment strategy
+        valid_strategies = ["round-robin", "random", "explicit", "locality-aware"]
+        if self.address_assignment not in valid_strategies:
+            raise ValueError(f"address_assignment must be one of {valid_strategies}")
+
+    def get_addresses_for_node(self, node_id):
+        """Determine which addresses this node should connect to.
+
+        Returns:
+            List[str]: A list of addresses this node should connect to.
+        """
         if not self.addresses:
             raise ValueError("No addresses configured")
 
+        # If explicit mapping is provided and this node is in the map
+        if self.address_assignment == "explicit" and node_id in self.node_address_map:
+            addrs = self.node_address_map[node_id]
+            if isinstance(addrs, str):
+                return [addrs]  # Convert single address to list
+            return addrs[:self.sockets_per_node]  # Limit to specified number of sockets
+
+        # If only one address is available, all nodes use it
         if len(self.addresses) == 1:
-            # Only one address, all nodes use it
-            return self.addresses[0]
+            return [self.addresses[0]]
+
+        # Number of addresses to assign (limited by available addresses)
+        num_addresses = min(self.sockets_per_node, len(self.addresses))
 
         # Multiple addresses - use assignment strategy
-        if self.address_assignment == "explicit":
-            # Use explicit mapping if provided
-            if node_id in self.node_address_map:
-                return self.node_address_map[node_id]
-            else:
-                # Fall back to modulo if node_id not in map
-                return self.addresses[node_id % len(self.addresses)]
-
-        elif self.address_assignment == "random":
+        if self.address_assignment == "random":
             # Use a seeded random assignment based on node_id
-            # This ensures the same node always gets the same address
             import random
-            random.seed(node_id)
-            return random.choice(self.addresses)
+            random_gen = random.Random(node_id)
+            return random_gen.sample(self.addresses, num_addresses)
+
+        elif self.address_assignment == "locality-aware":
+            # This would use network topology or IP address proximity
+            # For now, implement a simple version that groups addresses by subnet
+            # (actual implementation would need more sophisticated network knowledge)
+
+            # Extract host part from addresses
+            hosts = []
+            for addr in self.addresses:
+                if addr.startswith('tcp://'):
+                    host = addr.split('//')[1].split(':')[0]
+                    hosts.append(host)
+                else:
+                    hosts.append(addr)  # Can't parse, use as is
+
+            # Get this node's hostname
+            node_hostname = socket.gethostname()
+
+            # Try to get IP address
+            try:
+                node_ip = socket.gethostbyname(node_hostname)
+            except:
+                node_ip = "127.0.0.1"  # Default if can't resolve
+
+            # Score addresses by "closeness" to this node
+            # (This is a very simple heuristic - would need to be replaced with actual network topology)
+            def score_address(addr_idx):
+                host = hosts[addr_idx]
+                if host == node_hostname or host == node_ip:
+                    return 100  # Same host gets highest score
+                if host.startswith('127.0.0.') or host == 'localhost':
+                    return 90   # Local addresses get high score
+                return 0        # Default score
+
+            # Sort addresses by score (descending)
+            scored_addresses = [(score_address(i), i) for i in range(len(self.addresses))]
+            scored_addresses.sort(reverse=True)
+
+            # Take top addresses up to sockets_per_node
+            selected_indices = [idx for _, idx in scored_addresses[:num_addresses]]
+            return [self.addresses[idx] for idx in selected_indices]
 
         else:  # Default to "round-robin"
-            # Simple round-robin assignment
-            return self.addresses[node_id % len(self.addresses)]
+            # More sophisticated round-robin that gives each node a chunk of consecutive addresses
+            total_addresses = len(self.addresses)
+
+            # If we have more addresses than nodes*sockets_per_node, distribute them evenly
+            if total_addresses >= self.num_nodes * self.sockets_per_node:
+                start_idx = (node_id * self.sockets_per_node) % total_addresses
+                result = []
+                for i in range(num_addresses):
+                    idx = (start_idx + i) % total_addresses
+                    result.append(self.addresses[idx])
+                return result
+            else:
+                # Otherwise, basic round-robin starting at node's index
+                start_idx = node_id % total_addresses
+                result = []
+                for i in range(num_addresses):
+                    idx = (start_idx + i) % total_addresses
+                    result.append(self.addresses[idx])
+                return result
+
+
+class SocketHandler:
+    """Manages a connection to a data source via a socket"""
+
+    def __init__(self, address, timeout_ms, node_id, rank, node_queue, stop_flag, node_stats):
+        self.address = address
+        self.timeout_ms = timeout_ms
+        self.node_id = node_id
+        self.rank = rank
+        self.node_queue = node_queue
+        self.stop_flag = stop_flag
+        self.node_stats = node_stats
+        self.thread = None
+        self.connected = False
+        self.last_report_time = time.time()
+
+    def start(self):
+        """Start the puller thread for this socket"""
+        self.thread = threading.Thread(
+            target=self._pull_data_thread,
+            args=(
+                self.address,
+                self.timeout_ms,
+                self.node_id,
+                self.rank,
+                self.node_queue,
+                self.stop_flag,
+                self.node_stats,
+            )
+        )
+        self.thread.daemon = True
+        self.thread.start()
+
+    def is_alive(self):
+        """Check if the thread is alive"""
+        return self.thread is not None and self.thread.is_alive()
+
+    def join(self, timeout=None):
+        """Join the thread"""
+        if self.thread is not None:
+            self.thread.join(timeout)
+
+    def _pull_data_thread(self, address, timeout_ms, node_id, rank, node_queue, stop_flag, node_stats):
+        """Background thread to continuously pull data and fill the queue"""
+        # Make sure we have our own report time for the thread
+        thread_report_time = time.time()
+        socket_stats = {
+            'received': 0,
+            'queue_full': 0,
+            'timeouts': 0,
+            'errors': 0
+        }
+
+        try:
+            with Pull0(dial=address) as sock:
+                sock.recv_timeout = timeout_ms
+                self.connected = True
+
+                logger.info(f"[NODE {node_id}] Puller initialized, dialing to {address}")
+
+                while not stop_flag.is_set():
+                    try:
+                        # Pull data
+                        data = sock.recv()
+                        socket_stats['received'] += 1
+
+                        # Track received data
+                        with node_stats["total_received"].get_lock():
+                            node_stats["total_received"].value += 1
+
+                        # Extract tensor and metadata
+                        tensor, metadata = StreamingDataset._parse_data(data, rank)
+
+                        if tensor is not None:
+                            # Put in the queue (block if full)
+                            try:
+                                node_queue.put((tensor, metadata, address), block=True, timeout=1.0)
+                            except queue.Full:
+                                socket_stats['queue_full'] += 1
+                                logger.warning(f"[NODE {node_id}][SOCKET {address}] Queue full, dropping tensor")
+                                continue
+
+                            # Update latest global index if available
+                            if metadata and 'index' in metadata:
+                                with node_stats["latest_index"].get_lock():
+                                    node_stats["latest_index"].value = max(
+                                        node_stats["latest_index"].value,
+                                        metadata['index']
+                                    )
+
+                        # Periodic reporting (thread-local time)
+                        current_time = time.time()
+                        if current_time - thread_report_time > 10.0:  # 10 seconds
+                            try:
+                                queue_size = node_queue.qsize()
+                            except:
+                                queue_size = "Unknown"  # qsize() not reliable on all platforms
+
+                            received = node_stats["total_received"].value
+                            latest_idx = node_stats["latest_index"].value
+
+                            logger.info(f"[NODE {node_id}][SOCKET {address}] Stats: queue={queue_size}, "
+                                      f"socket_received={socket_stats['received']}, "
+                                      f"queue_full={socket_stats['queue_full']}, "
+                                      f"node_received={received}, latest_index={latest_idx}")
+                            thread_report_time = current_time
+
+                    except Timeout:
+                        # Just continue on timeout - this is normal
+                        socket_stats['timeouts'] += 1
+                        continue
+                    except Exception as e:
+                        socket_stats['errors'] += 1
+                        logger.error(f"[NODE {node_id}][SOCKET {address}] Error pulling data: {e}")
+                        continue
+
+        except Exception as e:
+            logger.error(f"[NODE {node_id}][SOCKET {address}] Fatal error in puller thread: {e}")
+
+        logger.info(f"[NODE {node_id}][SOCKET {address}] Puller thread exiting")
+        self.connected = False
+
 
 class StreamingDataset(IterableDataset):
     """
     A streaming dataset for multi-node training that:
-    - Has one socket connection per node (not per rank)
+    - Supports multiple socket connections per node
+    - Has one queue per node (shared by all ranks on that node)
     - Waits instead of generating random tensors if data isn't available
     - Tracks global indices for simple checkpointing/resumption
     - Works with distributed training across multiple nodes
@@ -94,7 +295,7 @@ class StreamingDataset(IterableDataset):
 
     # Class-level variables to manage node-level connections
     _node_queues = {}          # Shared queues per node
-    _node_pullers = {}         # Puller threads per node
+    _node_sockets = {}         # Socket handlers per node (multiple per node possible)
     _node_stop_flags = {}      # Stop flags per node
     _node_stats = {}           # Statistics per node
     _node_locks = {}           # Locks to ensure only one connection per node
@@ -109,12 +310,16 @@ class StreamingDataset(IterableDataset):
         self.local_rank = config.local_rank
         self.node_id = config.node_id
 
-        # Determine which address this node should use
-        self.node_address = config.get_address_for_node(self.node_id)
+        # Get addresses for this node
+        self.node_addresses = config.get_addresses_for_node(self.node_id)
 
-        # Create a unique key for this node that includes the address
-        # This allows different nodes to connect to different addresses
-        self.node_key = f"node_{self.node_id}_{self.node_address}"
+        if not self.node_addresses:
+            raise ValueError(f"No addresses assigned to node {self.node_id}")
+
+        logger.info(f"[RANK {self.rank}] Node {self.node_id} assigned addresses: {self.node_addresses}")
+
+        # Create a unique key for this node
+        self.node_key = f"node_{self.node_id}"
 
         # Initialize reporting variables
         self.last_report_time = time.time()
@@ -122,6 +327,9 @@ class StreamingDataset(IterableDataset):
 
         # Track highest global index seen by this rank
         self.highest_index = -1
+
+        # Track performance metrics per address
+        self.address_metrics = {addr: {'count': 0, 'latency': 0.0} for addr in self.node_addresses}
 
         # Set up node-level resources if this is the first rank on this node
         self._setup_node_resources()
@@ -148,7 +356,7 @@ class StreamingDataset(IterableDataset):
                 # Create a shared queue for this node
                 StreamingDataset._node_queues[self.node_key] = mp.Queue(self.config.queue_size)
 
-                # Create a stop flag for the puller thread
+                # Create a stop flag for the puller threads
                 StreamingDataset._node_stop_flags[self.node_key] = mp.Event()
 
                 # Create shared statistics counters
@@ -161,56 +369,73 @@ class StreamingDataset(IterableDataset):
                 # Initialize reference counter
                 StreamingDataset._node_ref_counts[self.node_key] = 0
 
-                # Start the puller thread for this node
-                self._start_node_puller()
+                # Initialize the socket handlers dictionary for this node
+                StreamingDataset._node_sockets[self.node_key] = {}
+
+                # Start socket handlers for this node
+                self._start_node_sockets()
 
             # Increment the reference counter
             StreamingDataset._node_ref_counts[self.node_key] += 1
 
             # Log node resource status
             logger.info(f"[RANK {self.rank}] Using node-level resources for node {self.node_id}, "
-                      f"ref count = {StreamingDataset._node_ref_counts[self.node_key]}")
+                      f"ref count = {StreamingDataset._node_ref_counts[self.node_key]}, "
+                      f"connected to {len(StreamingDataset._node_sockets[self.node_key])} sockets")
 
-    def _start_node_puller(self):
-        """Start the puller thread for this node if it's not already running"""
-        if self.node_key not in StreamingDataset._node_pullers or not StreamingDataset._node_pullers[self.node_key].is_alive():
-            # Log that we're starting a thread
-            logger.info(f"[RANK {self.rank}] Starting node-level puller thread for {self.config.address}")
+    def _start_node_sockets(self):
+        """Start socket handlers for this node"""
+        node_queue = StreamingDataset._node_queues[self.node_key]
+        node_stats = StreamingDataset._node_stats[self.node_key]
+        stop_flag = StreamingDataset._node_stop_flags[self.node_key]
 
-            # Create and start the thread with the node-specific address
-            StreamingDataset._node_pullers[self.node_key] = threading.Thread(
-                target=self._pull_data_thread,
-                args=(
-                    self.node_address,  # Use the node-specific address
-                    self.config.timeout_ms,
-                    self.node_id,
-                    self.rank,
-                    StreamingDataset._node_queues[self.node_key],
-                    StreamingDataset._node_stop_flags[self.node_key],
-                    StreamingDataset._node_stats[self.node_key],
-                )
+        # Start a handler for each address
+        for address in self.node_addresses:
+            if address in StreamingDataset._node_sockets[self.node_key]:
+                # Skip if we already have a handler for this address
+                continue
+
+            # Log that we're starting a socket handler
+            logger.info(f"[RANK {self.rank}] Starting socket handler for node {self.node_id}, address {address}")
+
+            # Create and start the socket handler
+            handler = SocketHandler(
+                address,
+                self.config.timeout_ms,
+                self.node_id,
+                self.rank,
+                node_queue,
+                stop_flag,
+                node_stats
             )
-            StreamingDataset._node_pullers[self.node_key].daemon = True
-            StreamingDataset._node_pullers[self.node_key].start()
 
-            # Wait for some initial data
-            got_data = False
-            start_time = time.time()
-            logger.info(f"[RANK {self.rank}] Waiting for initial data...")
+            StreamingDataset._node_sockets[self.node_key][address] = handler
+            handler.start()
 
-            while time.time() - start_time < self.config.connect_timeout:
-                try:
-                    if not StreamingDataset._node_queues[self.node_key].empty():
-                        got_data = True
-                        break
-                except Exception as e:
-                    logger.warning(f"[RANK {self.rank}] Error checking queue: {e}")
-                time.sleep(0.1)
+        # Wait for initial connections
+        start_time = time.time()
+        active_sockets = 0
 
-            if got_data:
-                logger.info(f"[RANK {self.rank}] Received initial data")
-            else:
-                logger.warning(f"[RANK {self.rank}] No initial data received after {self.config.connect_timeout}s")
+        logger.info(f"[RANK {self.rank}] Waiting for initial connections...")
+
+        while time.time() - start_time < self.config.connect_timeout and active_sockets == 0:
+            # Count active connections
+            active_sockets = sum(1 for handler in StreamingDataset._node_sockets[self.node_key].values()
+                               if handler.connected)
+
+            # If we have data or at least one connection, we're good to go
+            try:
+                if active_sockets > 0 or not node_queue.empty():
+                    break
+            except Exception as e:
+                logger.warning(f"[RANK {self.rank}] Error checking queue: {e}")
+
+            time.sleep(0.1)
+
+        logger.info(f"[RANK {self.rank}] Connected to {active_sockets}/{len(self.node_addresses)} sockets")
+
+        if active_sockets == 0:
+            logger.warning(f"[RANK {self.rank}] No connections established after {self.config.connect_timeout}s")
 
     def _signal_handler(self, sig, frame):
         """Handle signals to clean up resources properly"""
@@ -222,73 +447,6 @@ class StreamingDataset(IterableDataset):
             self._original_sigint_handler(sig, frame)
         elif sig == signal.SIGTERM and self._original_sigterm_handler:
             self._original_sigterm_handler(sig, frame)
-
-    @staticmethod
-    def _pull_data_thread(address, timeout_ms, node_id, rank, node_queue, stop_flag, node_stats):
-        """Background thread to continuously pull data and fill the queue"""
-        # Make sure we have our own report time for the thread
-        thread_report_time = time.time()
-
-        try:
-            with Pull0(dial=address) as sock:
-                sock.recv_timeout = timeout_ms
-
-                logger.info(f"[NODE {node_id}] Puller initialized, dialing to {address}")
-
-                while not stop_flag.is_set():
-                    try:
-                        # Pull data
-                        data = sock.recv()
-
-                        # Track received data
-                        with node_stats["total_received"].get_lock():
-                            node_stats["total_received"].value += 1
-
-                        # Extract tensor and metadata
-                        tensor, metadata = StreamingDataset._parse_data(data, rank)
-
-                        if tensor is not None:
-                            # Put in the queue (block if full)
-                            try:
-                                node_queue.put((tensor, metadata), block=True, timeout=1.0)
-                            except queue.Full:
-                                logger.warning(f"[NODE {node_id}] Queue full, dropping tensor")
-                                continue
-
-                            # Update latest global index if available
-                            if metadata and 'index' in metadata:
-                                with node_stats["latest_index"].get_lock():
-                                    node_stats["latest_index"].value = max(
-                                        node_stats["latest_index"].value,
-                                        metadata['index']
-                                    )
-
-                        # Periodic reporting (thread-local time)
-                        current_time = time.time()
-                        if current_time - thread_report_time > 10.0:  # 10 seconds
-                            try:
-                                queue_size = node_queue.qsize()
-                            except:
-                                queue_size = "Unknown"  # qsize() not reliable on all platforms
-
-                            received = node_stats["total_received"].value
-                            latest_idx = node_stats["latest_index"].value
-
-                            logger.info(f"[NODE {node_id}] Stats: queue={queue_size}, "
-                                      f"received={received}, latest_index={latest_idx}")
-                            thread_report_time = current_time
-
-                    except Timeout:
-                        # Just continue on timeout - this is normal
-                        continue
-                    except Exception as e:
-                        logger.error(f"[NODE {node_id}] Error pulling data: {e}")
-                        continue
-
-        except Exception as e:
-            logger.error(f"[NODE {node_id}] Fatal error in puller thread: {e}")
-
-        logger.info(f"[NODE {node_id}] Puller thread exiting")
 
     @staticmethod
     def _parse_data(data, rank):
@@ -331,6 +489,9 @@ class StreamingDataset(IterableDataset):
         node_stats = StreamingDataset._node_stats[self.node_key]
         stop_flag = StreamingDataset._node_stop_flags[self.node_key]
 
+        # Counter for address metrics
+        address_counts = Counter()
+
         # Iterator function
         def data_iterator():
             while not stop_flag.is_set():
@@ -338,7 +499,17 @@ class StreamingDataset(IterableDataset):
                     # Try to get an item from the queue
                     try:
                         # Block with timeout
-                        tensor, metadata = node_queue.get(block=True, timeout=0.1)
+                        start_time = time.time()
+                        tensor, metadata, address = node_queue.get(block=True, timeout=0.1)
+                        get_time = time.time() - start_time
+
+                        # Update address metrics
+                        address_counts[address] += 1
+
+                        # Every 1000 items, log the distribution of data from different sockets
+                        if sum(address_counts.values()) % 1000 == 0:
+                            logger.info(f"[RANK {self.rank}] Data source distribution: {dict(address_counts)}")
+
                     except queue.Empty:
                         # If queue is empty, check how long we've been waiting
                         if not hasattr(data_iterator, 'wait_start_time'):
@@ -349,7 +520,16 @@ class StreamingDataset(IterableDataset):
                         # If we've waited too long, raise an exception
                         if wait_time > self.config.max_wait_time:
                             logger.error(f"[RANK {self.rank}] No data received for {wait_time:.1f} seconds. Data source may be inactive.")
-                            raise RuntimeError(f"Data source appears to be inactive after {wait_time:.1f} seconds")
+
+                            # Check if we have any active connections
+                            active_sockets = sum(1 for handler in StreamingDataset._node_sockets[self.node_key].values()
+                                             if handler.is_alive() and handler.connected)
+
+                            if active_sockets == 0:
+                                raise RuntimeError(f"All data sources appear to be inactive after {wait_time:.1f} seconds")
+                            else:
+                                # Some connections are active but no data is coming through
+                                raise RuntimeError(f"Data sources appear to be stalled after {wait_time:.1f} seconds")
 
                         # Otherwise just continue waiting
                         if wait_time > 5 and int(wait_time) % 5 == 0:  # Log every 5 seconds
@@ -400,10 +580,11 @@ class StreamingDataset(IterableDataset):
         return {
             'rank': self.rank,
             'node_id': self.node_id,
-            'node_address': self.node_address,  # Include address in checkpoint info
+            'node_addresses': self.node_addresses,
             'highest_index': self.highest_index,
             'total_samples_received': node_stats["total_received"].value,
             'total_samples_processed': node_stats["total_yielded"].value,
+            'socket_distribution': dict(self.address_metrics),
         }
 
     def close(self):
@@ -426,12 +607,15 @@ class StreamingDataset(IterableDataset):
             if StreamingDataset._node_ref_counts[self.node_key] <= 0:
                 logger.info(f"[RANK {self.rank}] Last instance on node {self.node_id}, cleaning up resources")
 
-                # Stop the puller thread
+                # Stop the puller threads
                 if self.node_key in StreamingDataset._node_stop_flags:
                     StreamingDataset._node_stop_flags[self.node_key].set()
 
-                if self.node_key in StreamingDataset._node_pullers and StreamingDataset._node_pullers[self.node_key].is_alive():
-                    StreamingDataset._node_pullers[self.node_key].join(timeout=2.0)
+                # Join all socket threads
+                if self.node_key in StreamingDataset._node_sockets:
+                    for address, handler in StreamingDataset._node_sockets[self.node_key].items():
+                        logger.info(f"[RANK {self.rank}] Joining thread for address {address}")
+                        handler.join(timeout=2.0)
 
                 # Clean up resources
                 if self.node_key in StreamingDataset._node_queues:
@@ -444,7 +628,7 @@ class StreamingDataset(IterableDataset):
 
                 # Remove references
                 StreamingDataset._node_ref_counts.pop(self.node_key, None)
-                StreamingDataset._node_pullers.pop(self.node_key, None)
+                StreamingDataset._node_sockets.pop(self.node_key, None)
                 StreamingDataset._node_stop_flags.pop(self.node_key, None)
                 StreamingDataset._node_queues.pop(self.node_key, None)
                 StreamingDataset._node_stats.pop(self.node_key, None)
