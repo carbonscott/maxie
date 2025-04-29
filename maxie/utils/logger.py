@@ -23,19 +23,10 @@ def sync_timestamp(rank, device):
     timestamp = timestamp_list[0]
     return timestamp
 
-def init_logger(uses_dist, dist_rank, device, fl_prefix=None, drc_log="logs", level='info', log_to='both'):
+
+def init_logger(uses_dist, dist_rank, device, fl_prefix=None, drc_log="logs", level='info', log_to='both', logger_name=None):
     """
     Initialize logger with synchronized timestamp across distributed processes.
-    Args:
-        uses_dist (bool): Whether distributed processing is being used
-        dist_rank (int): Rank of current process
-        device (torch.device): Device to use for timestamp synchronization
-        fl_prefix (str, optional): Prefix for log filename
-        drc_log (str, optional): Directory for log files
-        level (str, optional): Logging level ('info' or 'debug')
-        log_to (str, optional): Where to send logs - 'file', 'console', or 'both'
-    Returns:
-        str: Synchronized timestamp string
     """
     # Generate and synchronize timestamp
     if uses_dist:
@@ -43,12 +34,18 @@ def init_logger(uses_dist, dist_rank, device, fl_prefix=None, drc_log="logs", le
     else:
         timestamp = datetime.now().strftime("%Y_%m%d_%H%M_%S")
 
-    # Set up logging handlers
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)  # Set to DEBUG to capture all levels
+    # Use a specific logger name if provided, otherwise use module name
+    logger_name = logger_name or __name__
+    logger = logging.getLogger(logger_name)
 
-    # Clear any existing handlers
-    logger.handlers.clear()
+    # Set to DEBUG to capture all levels
+    logger.setLevel(logging.DEBUG)
+
+    ## # Clear any existing handlers
+    ## logger.handlers.clear()
+
+    # Disable propagation to prevent affecting parent loggers
+    logger.propagate = True
 
     # Configure log level
     log_level_spec = {
@@ -62,6 +59,7 @@ def init_logger(uses_dist, dist_rank, device, fl_prefix=None, drc_log="logs", le
         datefmt="%m/%d/%Y %H:%M:%S"
     )
 
+    # Set up file handler if needed
     if log_to in ['file', 'both']:
         # Set up the log file path
         base_log = f"{timestamp}"
@@ -78,8 +76,8 @@ def init_logger(uses_dist, dist_rank, device, fl_prefix=None, drc_log="logs", le
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
+    # Set up console handler if needed
     if log_to in ['console', 'both']:
-        # Create console handler
         console_handler = logging.StreamHandler()
         console_handler.setLevel(log_level)
         console_handler.setFormatter(formatter)
@@ -88,4 +86,20 @@ def init_logger(uses_dist, dist_rank, device, fl_prefix=None, drc_log="logs", le
     return timestamp, logger
 
 
+def init_timestamp(uses_dist, dist_rank, device):
+    """
+    Initialize logger with synchronized timestamp across distributed processes.
+    Args:
+        uses_dist (bool): Whether distributed processing is being used
+        dist_rank (int): Rank of current process
+        device (torch.device): Device to use for timestamp synchronization
+    Returns:
+        str: Synchronized timestamp string
+    """
+    # Generate and synchronize timestamp
+    if uses_dist:
+        timestamp = sync_timestamp(dist_rank, device)
+    else:
+        timestamp = datetime.now().strftime("%Y_%m%d_%H%M_%S")
 
+    return timestamp

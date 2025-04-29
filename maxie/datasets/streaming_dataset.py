@@ -21,7 +21,11 @@ import yaml
 import math
 from collections import Counter
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('dataset')
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+)
 
 @dataclass
 class StreamingDataConfig:
@@ -326,7 +330,7 @@ class StreamingDataset(IterableDataset):
         self.report_interval = 10.0  # seconds
 
         # Track highest global index seen by this rank
-        self.highest_index = -1
+        self.highest_index = mp.Value('i', -1)
 
         # Track performance metrics per address
         self.address_metrics = {addr: {'count': 0, 'latency': 0.0} for addr in self.node_addresses}
@@ -571,7 +575,8 @@ class StreamingDataset(IterableDataset):
 
                     # Update the highest index seen by this rank
                     if metadata and 'index' in metadata:
-                        self.highest_index = max(self.highest_index, metadata['index'])
+                        with self.highest_index.get_lock():
+                            self.highest_index.value = max(self.highest_index.value, metadata['index'])
 
                     yield tensor
 
@@ -604,7 +609,7 @@ class StreamingDataset(IterableDataset):
             'rank': self.rank,
             'node_id': self.node_id,
             'node_addresses': self.node_addresses,
-            'highest_index': self.highest_index,
+            'highest_index': self.highest_index.value,
             'total_samples_received': node_stats["total_received"].value,
             'total_samples_processed': node_stats["total_yielded"].value,
             'socket_distribution': socket_distribution,
