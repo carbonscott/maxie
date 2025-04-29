@@ -366,6 +366,14 @@ class StreamingDataset(IterableDataset):
                     'latest_index': mp.Value('i', -1),
                 }
 
+                # Add shared address metrics
+                StreamingDataset._node_stats[self.node_key]['address_metrics'] = {}
+                for addr in self.node_addresses:
+                    StreamingDataset._node_stats[self.node_key]['address_metrics'][addr] = {
+                        'count': mp.Value('i', 0),
+                        'latency': mp.Value('d', 0.0)
+                    }
+
                 # Initialize reference counter
                 StreamingDataset._node_ref_counts[self.node_key] = 0
 
@@ -506,6 +514,13 @@ class StreamingDataset(IterableDataset):
                         # Update address metrics
                         address_counts[address] += 1
 
+                        # Update the shared address metrics
+                        if address in node_stats['address_metrics']:
+                            with node_stats['address_metrics'][address]['count'].get_lock():
+                                node_stats['address_metrics'][address]['count'].value += 1
+                            with node_stats['address_metrics'][address]['latency'].get_lock():
+                                node_stats['address_metrics'][address]['latency'].value += get_time
+
                         # Every 1000 items, log the distribution of data from different sockets
                         if sum(address_counts.values()) % 1000 == 0:
                             logger.info(f"[RANK {self.rank}] Data source distribution: {dict(address_counts)}")
@@ -571,11 +586,19 @@ class StreamingDataset(IterableDataset):
         return data_iterator()
 
     def get_checkpoint_info(self):
-        """
-        Return checkpoint info that can be saved with the model checkpoint.
-        This provides hints to the data pusher about where to resume.
-        """
+        """Return checkpoint info that can be saved with the model checkpoint."""
         node_stats = StreamingDataset._node_stats[self.node_key]
+
+        # Convert shared metrics to a regular dictionary
+        socket_distribution = {}
+        for addr in self.node_addresses:
+            if addr in node_stats['address_metrics']:
+                socket_distribution[addr] = {
+                    'count': node_stats['address_metrics'][addr]['count'].value,
+                    'latency': node_stats['address_metrics'][addr]['latency'].value
+                }
+            else:
+                socket_distribution[addr] = {'count': 0, 'latency': 0.0}
 
         return {
             'rank': self.rank,
@@ -584,7 +607,7 @@ class StreamingDataset(IterableDataset):
             'highest_index': self.highest_index,
             'total_samples_received': node_stats["total_received"].value,
             'total_samples_processed': node_stats["total_yielded"].value,
-            'socket_distribution': dict(self.address_metrics),
+            'socket_distribution': socket_distribution,
         }
 
     def close(self):
