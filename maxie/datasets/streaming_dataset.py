@@ -27,6 +27,8 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s: %(message)s",
 )
 
+POISON_PILL = ("__TERMINATE__", None, None)  # Special message to signal worker termination
+
 @dataclass
 class StreamingDataConfig:
     C: int                                      # Number of channels
@@ -48,6 +50,7 @@ class StreamingDataConfig:
     local_rank: int = 0                         # Local rank (within node)
     num_nodes: int = 1                          # Number of nodes
     node_id: int = 0                            # ID of this node
+    num_workers: int = 0                        # Number of workers in each dataloader
     lock_dir: str = None                        # Directory for lock files
 
     def __post_init__(self):
@@ -513,6 +516,12 @@ class StreamingDataset(IterableDataset):
                         # Block with timeout
                         start_time = time.time()
                         tensor, metadata, address = node_queue.get(block=True, timeout=0.1)
+
+                        # Check for poison pill
+                        if tensor == "__TERMINATE__":
+                            logger.info(f"[RANK {self.rank}] Worker {worker_id} received termination signal")
+                            break
+
                         get_time = time.time() - start_time
 
                         # Update address metrics
@@ -625,7 +634,7 @@ class StreamingDataset(IterableDataset):
         logger.info(f"[RANK {self.rank}] Closing streaming dataset. "
                    f"Node received {node_stats['total_received'].value} tensors, "
                    f"yielded {node_stats['total_yielded'].value} tensors, "
-                   f"highest index {self.highest_index}")
+                   f"highest index {self.highest_index.value}")
 
         # Decrement reference counter
         with StreamingDataset._node_locks[self.node_key]:
@@ -639,20 +648,28 @@ class StreamingDataset(IterableDataset):
                 if self.node_key in StreamingDataset._node_stop_flags:
                     StreamingDataset._node_stop_flags[self.node_key].set()
 
+                # Send poison pills to workers
+                if self.config.num_workers > 0 and self.node_key in StreamingDataset._node_queues:
+                    logger.info(f"[RANK {self.rank}] Sending termination signals to {self.config.num_workers} workers")
+                    for _ in range(self.config.num_workers):
+                        try:
+                            StreamingDataset._node_queues[self.node_key].put(POISON_PILL, block=False)
+                        except queue.Full:
+                            pass  # Queue full, worker might not terminate via pill
+
+                # Cancel queue join thread and close the queue to prevent hanging
+                if self.node_key in StreamingDataset._node_queues:
+                    try:
+                        StreamingDataset._node_queues[self.node_key].cancel_join_thread()
+                        StreamingDataset._node_queues[self.node_key].close()
+                    except Exception as e:
+                        logger.warning(f"[RANK {self.rank}] Error during queue cleanup: {e}")
+
                 # Join all socket threads
                 if self.node_key in StreamingDataset._node_sockets:
                     for address, handler in StreamingDataset._node_sockets[self.node_key].items():
                         logger.info(f"[RANK {self.rank}] Joining thread for address {address}")
                         handler.join(timeout=2.0)
-
-                # Clean up resources
-                if self.node_key in StreamingDataset._node_queues:
-                    # Clear the queue
-                    try:
-                        while not StreamingDataset._node_queues[self.node_key].empty():
-                            StreamingDataset._node_queues[self.node_key].get_nowait()
-                    except:
-                        pass
 
                 # Remove references
                 StreamingDataset._node_ref_counts.pop(self.node_key, None)
