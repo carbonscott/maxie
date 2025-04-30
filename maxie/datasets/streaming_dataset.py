@@ -268,9 +268,9 @@ class SocketHandler:
                             received = node_stats["total_received"].value
                             latest_idx = node_stats["latest_index"].value
 
-                            logger.info(f"[NODE {node_id}][SOCKET {address}] Stats: queue={queue_size}, "
-                                      f"socket_received={socket_stats['received']}, "
-                                      f"queue_full={socket_stats['queue_full']}, "
+                            logger.info(f"[NODE {node_id}][SOCKET {address}] Stats: queue={queue_size} | "
+                                      f"socket_received={socket_stats['received']} | "
+                                      f"queue_full={socket_stats['queue_full']} | "
                                       f"node_received={received}, latest_index={latest_idx}")
                             thread_report_time = current_time
 
@@ -669,7 +669,7 @@ class StreamingDataset(IterableDataset):
                 if self.node_key in StreamingDataset._node_sockets:
                     for address, handler in StreamingDataset._node_sockets[self.node_key].items():
                         logger.info(f"[RANK {self.rank}] Joining thread for address {address}")
-                        handler.join(timeout=2.0)
+                        handler.join(timeout=10.0)
 
                 # Remove references
                 StreamingDataset._node_ref_counts.pop(self.node_key, None)
