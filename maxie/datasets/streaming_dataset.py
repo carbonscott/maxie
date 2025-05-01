@@ -233,6 +233,12 @@ class SocketHandler:
                         data = sock.recv()
                         socket_stats['received'] += 1
 
+                        # Update socket-specific byte counter
+                        addr_metrics = node_stats['address_metrics'].get(address)
+                        if addr_metrics:
+                            with addr_metrics['bytes_total'].get_lock():
+                                addr_metrics['bytes_total'].value += len(data)
+
                         # Track received data
                         with node_stats["total_received"].get_lock():
                             node_stats["total_received"].value += 1
@@ -260,6 +266,19 @@ class SocketHandler:
                         # Periodic reporting (thread-local time)
                         current_time = time.time()
                         if current_time - thread_report_time > 10.0:  # 10 seconds
+                            addr_metrics = node_stats['address_metrics'].get(address)
+                            if addr_metrics:
+                                with addr_metrics['bytes_total'].get_lock(), addr_metrics['last_bytes_total'].get_lock(), addr_metrics['last_report_time'].get_lock():
+                                    # Calculate bytes transferred since last report
+                                    bytes_delta = addr_metrics['bytes_total'].value - addr_metrics['last_bytes_total'].value
+                                    time_delta = current_time - addr_metrics['last_report_time'].value
+
+                                    # Calculate throughput
+                                    throughput = bytes_delta / (1024**3) / time_delta if time_delta > 0 else 0
+
+                                    # Update last values for next calculation
+                                    addr_metrics['last_bytes_total'].value = addr_metrics['bytes_total'].value
+                                    addr_metrics['last_report_time'].value = current_time
                             try:
                                 queue_size = node_queue.qsize()
                             except:
@@ -271,7 +290,9 @@ class SocketHandler:
                             logger.info(f"[NODE {node_id}][SOCKET {address}] Stats: queue={queue_size} | "
                                       f"socket_received={socket_stats['received']} | "
                                       f"queue_full={socket_stats['queue_full']} | "
-                                      f"node_received={received}, latest_index={latest_idx}")
+                                      f"node_received={received} | "
+                                      f"throughput/socket={throughput:.4f} GB/s | "
+                                      f"latest_index={latest_idx}")
                             thread_report_time = current_time
 
                     except Timeout:
@@ -378,7 +399,10 @@ class StreamingDataset(IterableDataset):
                 for addr in self.node_addresses:
                     StreamingDataset._node_stats[self.node_key]['address_metrics'][addr] = {
                         'count': mp.Value('i', 0),
-                        'latency': mp.Value('d', 0.0)
+                        'latency': mp.Value('d', 0.0),
+                        'bytes_total': mp.Value('L', 0),
+                        'last_report_time': mp.Value('d', time.time()),
+                        'last_bytes_total': mp.Value('L', 0),
                     }
 
                 # Initialize reference counter
