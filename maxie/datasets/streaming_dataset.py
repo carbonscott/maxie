@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import IterableDataset
-import torch.multiprocessing as mp
+import multiprocessing as mp
 from dataclasses import dataclass, field
 from typing import Optional, Union, List, Tuple, Dict
 import io
@@ -52,6 +52,7 @@ class StreamingDataConfig:
     node_id: int = 0                            # ID of this node
     num_workers: int = 0                        # Number of workers in each dataloader
     lock_dir: str = None                        # Directory for lock files
+    distribution_strategy: str = "round-robin"  # How to distribute tensors across rank queues
 
     def __post_init__(self):
         """Validate and normalize configuration after initialization"""
@@ -74,6 +75,12 @@ class StreamingDataConfig:
         valid_strategies = ["round-robin", "random", "explicit", "locality-aware"]
         if self.address_assignment not in valid_strategies:
             raise ValueError(f"address_assignment must be one of {valid_strategies}")
+
+        # Validate the distribution_strategy
+        valid_dist_strategies = ["round-robin", "balanced", "local-first", "random"]
+        if self.distribution_strategy not in valid_dist_strategies:
+            logger.warning(f"Invalid distribution_strategy '{self.distribution_strategy}', defaulting to 'round-robin'")
+            self.distribution_strategy = "round-robin"
 
     def get_addresses_for_node(self, node_id):
         """Determine which addresses this node should connect to.
@@ -171,17 +178,19 @@ class StreamingDataConfig:
 class SocketHandler:
     """Manages a connection to a data source via a socket"""
 
-    def __init__(self, address, timeout_ms, node_id, rank, node_queue, stop_flag, node_stats):
+    def __init__(self, address, timeout_ms, node_id, rank, rank_queues, stop_flag, node_stats, distribution_strategy):
         self.address = address
         self.timeout_ms = timeout_ms
         self.node_id = node_id
         self.rank = rank
-        self.node_queue = node_queue
+        self.rank_queues = rank_queues  # Dictionary of rank_id -> Queue
         self.stop_flag = stop_flag
         self.node_stats = node_stats
+        self.distribution_strategy = distribution_strategy
         self.thread = None
         self.connected = False
         self.last_report_time = time.time()
+        self.next_rank_idx = 0  # For round-robin distribution
 
     def start(self):
         """Start the puller thread for this socket"""
@@ -192,9 +201,10 @@ class SocketHandler:
                 self.timeout_ms,
                 self.node_id,
                 self.rank,
-                self.node_queue,
+                self.rank_queues,
                 self.stop_flag,
                 self.node_stats,
+                self.distribution_strategy,
             )
         )
         self.thread.daemon = True
@@ -209,7 +219,84 @@ class SocketHandler:
         if self.thread is not None:
             self.thread.join(timeout)
 
-    def _pull_data_thread(self, address, timeout_ms, node_id, rank, node_queue, stop_flag, node_stats):
+    def _select_target_queue(self, rank_queues, metadata=None):
+        """
+        Select which rank queue to send the tensor to based on the distribution strategy.
+
+        Args:
+            rank_queues: Dictionary of rank_id -> Queue
+            metadata: Optional metadata associated with the tensor
+
+        Returns:
+            Tuple of (queue, rank_id)
+        """
+        rank_ids = list(rank_queues.keys())
+
+        if not rank_ids:
+            return None, None
+
+        # Simplified strategy - just use the first queue
+        # We're now passing only this rank's queue, so this should always work
+        # This eliminates cross-rank coordination issues
+        if len(rank_ids) == 1:
+            rank_id = rank_ids[0]
+            return rank_queues[rank_id], rank_id
+
+        # The code below will only execute if we have multiple rank queues
+        # which may happen in future extensions
+        if self.distribution_strategy == "round-robin":
+            # Simple round-robin distribution
+            rank_id = rank_ids[self.next_rank_idx % len(rank_ids)]
+            self.next_rank_idx = (self.next_rank_idx + 1) % len(rank_ids)
+            return rank_queues[rank_id], rank_id
+
+        elif self.distribution_strategy == "balanced":
+            # Try to find the queue with the fewest items
+            min_size = float('inf')
+            min_rank_id = rank_ids[0]
+
+            for rank_id in rank_ids:
+                try:
+                    qsize = rank_queues[rank_id].qsize()
+                    if qsize < min_size:
+                        min_size = qsize
+                        min_rank_id = rank_id
+                except:
+                    # qsize() might not be reliable on all platforms
+                    pass
+
+            return rank_queues[min_rank_id], min_rank_id
+
+        elif self.distribution_strategy == "local-first":
+            # Prefer local ranks first
+            # This assumes rank_id convention: rank_node_id
+            local_rank_ids = [r for r in rank_ids if r.startswith(f"rank_{self.node_id}_")]
+
+            if local_rank_ids:
+                # If we have local ranks, use round-robin among them
+                local_idx = self.next_rank_idx % len(local_rank_ids)
+                self.next_rank_idx = (self.next_rank_idx + 1) % len(local_rank_ids)
+                rank_id = local_rank_ids[local_idx]
+            else:
+                # Fallback to regular round-robin
+                rank_id = rank_ids[self.next_rank_idx % len(rank_ids)]
+                self.next_rank_idx = (self.next_rank_idx + 1) % len(rank_ids)
+
+            return rank_queues[rank_id], rank_id
+
+        elif self.distribution_strategy == "random":
+            # Random distribution
+            import random
+            rank_id = random.choice(rank_ids)
+            return rank_queues[rank_id], rank_id
+
+        else:
+            # Default to round-robin
+            rank_id = rank_ids[self.next_rank_idx % len(rank_ids)]
+            self.next_rank_idx = (self.next_rank_idx + 1) % len(rank_ids)
+            return rank_queues[rank_id], rank_id
+
+    def _pull_data_thread(self, address, timeout_ms, node_id, rank, rank_queues, stop_flag, node_stats, distribution_strategy):
         """Background thread to continuously pull data and fill the queue"""
         # Make sure we have our own report time for the thread
         thread_report_time = time.time()
@@ -219,6 +306,9 @@ class SocketHandler:
             'timeouts': 0,
             'errors': 0
         }
+
+        # Track distribution of tensors to ranks
+        rank_distribution = Counter()
 
         try:
             with Pull0(dial=address) as sock:
@@ -247,12 +337,25 @@ class SocketHandler:
                         tensor, metadata = StreamingDataset._parse_data(data, rank)
 
                         if tensor is not None:
+                            # In the simplified version, we know we only have one queue (this rank's)
+                            # So we'll just use the first one in the dictionary
+                            if not rank_queues:
+                                logger.warning(f"[NODE {node_id}][SOCKET {address}] No valid rank queues found")
+                                continue
+
+                            # Get the first (and likely only) queue
+                            target_rank_id = next(iter(rank_queues.keys()))
+                            target_queue = rank_queues[target_rank_id]
+
+                            # Track distribution
+                            rank_distribution[target_rank_id] += 1
+
                             # Put in the queue (block if full)
                             try:
-                                node_queue.put((tensor, metadata, address), block=True, timeout=1.0)
+                                target_queue.put((tensor, metadata, address), block=True, timeout=1.0)
                             except queue.Full:
                                 socket_stats['queue_full'] += 1
-                                logger.warning(f"[NODE {node_id}][SOCKET {address}] Queue full, dropping tensor")
+                                logger.warning(f"[NODE {node_id}][SOCKET {address}] Queue for rank {target_rank_id} full, dropping tensor")
                                 continue
 
                             # Update latest global index if available
@@ -279,20 +382,28 @@ class SocketHandler:
                                     # Update last values for next calculation
                                     addr_metrics['last_bytes_total'].value = addr_metrics['bytes_total'].value
                                     addr_metrics['last_report_time'].value = current_time
-                            try:
-                                queue_size = node_queue.qsize()
-                            except:
-                                queue_size = "Unknown"  # qsize() not reliable on all platforms
+
+                            # Log queue sizes for each rank
+                            queue_sizes = {}
+                            for rank_id, q in rank_queues.items():
+                                try:
+                                    queue_sizes[rank_id] = q.qsize()
+                                except:
+                                    queue_sizes[rank_id] = "Unknown"  # qsize() not reliable on all platforms
 
                             received = node_stats["total_received"].value
                             latest_idx = node_stats["latest_index"].value
 
-                            logger.info(f"[NODE {node_id}][SOCKET {address}] Stats: queue={queue_size} | "
+                            logger.info(f"[NODE {node_id}][SOCKET {address}] Stats: queue_sizes={queue_sizes} | "
                                       f"socket_received={socket_stats['received']} | "
                                       f"queue_full={socket_stats['queue_full']} | "
                                       f"node_received={received} | "
                                       f"throughput/socket={throughput:.4f} GB/s | "
                                       f"latest_index={latest_idx}")
+
+                            # Log distribution of tensors to ranks
+                            logger.info(f"[NODE {node_id}][SOCKET {address}] Rank distribution: {dict(rank_distribution)}")
+
                             thread_report_time = current_time
 
                     except Timeout:
@@ -315,19 +426,20 @@ class StreamingDataset(IterableDataset):
     """
     A streaming dataset for multi-node training that:
     - Supports multiple socket connections per node
-    - Has one queue per node (shared by all ranks on that node)
+    - Has one queue per rank (instead of per node)
     - Waits instead of generating random tensors if data isn't available
     - Tracks global indices for simple checkpointing/resumption
     - Works with distributed training across multiple nodes
     """
 
     # Class-level variables to manage node-level connections
-    _node_queues = {}          # Shared queues per node
+    _rank_queues = {}          # Shared queues per rank
     _node_sockets = {}         # Socket handlers per node (multiple per node possible)
     _node_stop_flags = {}      # Stop flags per node
     _node_stats = {}           # Statistics per node
     _node_locks = {}           # Locks to ensure only one connection per node
-    _node_ref_counts = {}      # Reference counts for cleanup
+    _node_ref_counts = {}      # Reference counts for cleanup per node
+    _rank_ref_counts = {}      # Reference counts for cleanup per rank
 
     def __init__(self, config):
         self.config = config
@@ -346,8 +458,9 @@ class StreamingDataset(IterableDataset):
 
         logger.info(f"[RANK {self.rank}] Node {self.node_id} assigned addresses: {self.node_addresses}")
 
-        # Create a unique key for this node
+        # Create a unique key for this node and rank
         self.node_key = f"node_{self.node_id}"
+        self.rank_key = f"rank_{self.rank}"
 
         # Initialize reporting variables
         self.last_report_time = time.time()
@@ -362,11 +475,26 @@ class StreamingDataset(IterableDataset):
         # Set up node-level resources if this is the first rank on this node
         self._setup_node_resources()
 
+        # Set up rank-specific queue
+        self._setup_rank_queue()
+
         # Register signal handlers for cleanup
         self._original_sigint_handler = signal.getsignal(signal.SIGINT)
         self._original_sigterm_handler = signal.getsignal(signal.SIGTERM)
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+
+    def _setup_rank_queue(self):
+        """Set up a queue specific to this rank"""
+        # Create a queue for this rank if it doesn't exist
+        if self.rank_key not in StreamingDataset._rank_queues:
+            StreamingDataset._rank_queues[self.rank_key] = mp.Queue(self.config.queue_size)
+            StreamingDataset._rank_ref_counts[self.rank_key] = 0
+
+        # Increment reference count for this rank's queue
+        StreamingDataset._rank_ref_counts[self.rank_key] += 1
+
+        logger.info(f"[RANK {self.rank}] Using rank-specific queue, ref count = {StreamingDataset._rank_ref_counts[self.rank_key]}")
 
     def _setup_node_resources(self):
         """Set up shared resources at the node level"""
@@ -375,14 +503,14 @@ class StreamingDataset(IterableDataset):
         if self.node_key not in StreamingDataset._node_locks:
             StreamingDataset._node_locks[self.node_key] = threading.Lock()
 
+        # Make sure rank queue exists before entering the lock
+        self._setup_rank_queue()
+
         with StreamingDataset._node_locks[self.node_key]:
             # Check if resources exist
-            if self.node_key not in StreamingDataset._node_queues:
+            if self.node_key not in StreamingDataset._node_stop_flags:
                 # This is the first rank on this node - create shared resources
                 logger.info(f"[RANK {self.rank}] Creating node-level resources for node {self.node_id}")
-
-                # Create a shared queue for this node
-                StreamingDataset._node_queues[self.node_key] = mp.Queue(self.config.queue_size)
 
                 # Create a stop flag for the puller threads
                 StreamingDataset._node_stop_flags[self.node_key] = mp.Event()
@@ -411,11 +539,12 @@ class StreamingDataset(IterableDataset):
                 # Initialize the socket handlers dictionary for this node
                 StreamingDataset._node_sockets[self.node_key] = {}
 
-                # Start socket handlers for this node
-                self._start_node_sockets()
-
-            # Increment the reference counter
+            # Increment the reference counter for this node
             StreamingDataset._node_ref_counts[self.node_key] += 1
+
+            # Start socket handlers for this node if they haven't been started yet
+            if len(StreamingDataset._node_sockets[self.node_key]) == 0:
+                self._start_node_sockets()
 
             # Log node resource status
             logger.info(f"[RANK {self.rank}] Using node-level resources for node {self.node_id}, "
@@ -424,9 +553,16 @@ class StreamingDataset(IterableDataset):
 
     def _start_node_sockets(self):
         """Start socket handlers for this node"""
-        node_queue = StreamingDataset._node_queues[self.node_key]
         node_stats = StreamingDataset._node_stats[self.node_key]
         stop_flag = StreamingDataset._node_stop_flags[self.node_key]
+
+        # Make sure this rank's queue exists
+        if self.rank_key not in StreamingDataset._rank_queues:
+            self._setup_rank_queue()
+
+        # Get all rank queues for this node
+        # For now, just use this rank's queue to avoid cross-rank issues
+        node_rank_queues = {self.rank_key: StreamingDataset._rank_queues[self.rank_key]}
 
         # Start a handler for each address
         for address in self.node_addresses:
@@ -443,9 +579,10 @@ class StreamingDataset(IterableDataset):
                 self.config.timeout_ms,
                 self.node_id,
                 self.rank,
-                node_queue,
+                node_rank_queues,
                 stop_flag,
-                node_stats
+                node_stats,
+                self.config.distribution_strategy
             )
 
             StreamingDataset._node_sockets[self.node_key][address] = handler
@@ -463,8 +600,12 @@ class StreamingDataset(IterableDataset):
                                if handler.connected)
 
             # If we have data or at least one connection, we're good to go
+            if active_sockets > 0:
+                break
+
+            # Check if there's data in the rank queue
             try:
-                if active_sockets > 0 or not node_queue.empty():
+                if self.rank_key in StreamingDataset._rank_queues and not StreamingDataset._rank_queues[self.rank_key].empty():
                     break
             except Exception as e:
                 logger.warning(f"[RANK {self.rank}] Error checking queue: {e}")
@@ -523,8 +664,8 @@ class StreamingDataset(IterableDataset):
 
         logger.info(f"[RANK {self.rank}] Worker {worker_id}/{num_workers} starting iteration")
 
-        # Queue for this rank/worker
-        node_queue = StreamingDataset._node_queues[self.node_key]
+        # Queue for this rank
+        rank_queue = StreamingDataset._rank_queues[self.rank_key]
         node_stats = StreamingDataset._node_stats[self.node_key]
         stop_flag = StreamingDataset._node_stop_flags[self.node_key]
 
@@ -539,7 +680,7 @@ class StreamingDataset(IterableDataset):
                     try:
                         # Block with timeout
                         start_time = time.time()
-                        tensor, metadata, address = node_queue.get(block=True, timeout=0.1)
+                        tensor, metadata, address = rank_queue.get(block=True, timeout=0.1)
 
                         # Check for poison pill
                         if tensor == "__TERMINATE__":
@@ -573,7 +714,7 @@ class StreamingDataset(IterableDataset):
                         if wait_time > self.config.max_wait_time:
                             logger.error(f"[RANK {self.rank}] No data received for {wait_time:.1f} seconds. Data source may be inactive.")
 
-                            # Check if we have any active connections
+                            # Check if we have any active connections on this node
                             active_sockets = sum(1 for handler in StreamingDataset._node_sockets[self.node_key].values()
                                              if handler.is_alive() and handler.connected)
 
@@ -660,7 +801,34 @@ class StreamingDataset(IterableDataset):
                    f"yielded {node_stats['total_yielded'].value} tensors, "
                    f"highest index {self.highest_index.value}")
 
-        # Decrement reference counter
+        # Decrement reference counter for this rank's queue
+        if hasattr(self, 'rank_key') and self.rank_key in StreamingDataset._rank_ref_counts:
+            StreamingDataset._rank_ref_counts[self.rank_key] -= 1
+
+            # If this is the last reference to this rank's queue, clean it up
+            if StreamingDataset._rank_ref_counts[self.rank_key] <= 0:
+                logger.info(f"[RANK {self.rank}] Last reference to rank queue, cleaning up")
+
+                # Send poison pill to workers for this rank
+                if self.config.num_workers > 0:
+                    try:
+                        for _ in range(self.config.num_workers):
+                            StreamingDataset._rank_queues[self.rank_key].put(POISON_PILL, block=False)
+                    except queue.Full:
+                        pass  # Queue full, worker might not terminate via pill
+
+                # Clean up queue
+                try:
+                    StreamingDataset._rank_queues[self.rank_key].cancel_join_thread()
+                    StreamingDataset._rank_queues[self.rank_key].close()
+                except Exception as e:
+                    logger.warning(f"[RANK {self.rank}] Error cleaning up rank queue: {e}")
+
+                # Remove references
+                StreamingDataset._rank_queues.pop(self.rank_key, None)
+                StreamingDataset._rank_ref_counts.pop(self.rank_key, None)
+
+        # Decrement reference counter for node resources
         with StreamingDataset._node_locks[self.node_key]:
             StreamingDataset._node_ref_counts[self.node_key] -= 1
 
@@ -672,34 +840,16 @@ class StreamingDataset(IterableDataset):
                 if self.node_key in StreamingDataset._node_stop_flags:
                     StreamingDataset._node_stop_flags[self.node_key].set()
 
-                # Send poison pills to workers
-                if self.config.num_workers > 0 and self.node_key in StreamingDataset._node_queues:
-                    logger.info(f"[RANK {self.rank}] Sending termination signals to {self.config.num_workers} workers")
-                    for _ in range(self.config.num_workers):
-                        try:
-                            StreamingDataset._node_queues[self.node_key].put(POISON_PILL, block=False)
-                        except queue.Full:
-                            pass  # Queue full, worker might not terminate via pill
-
-                # Cancel queue join thread and close the queue to prevent hanging
-                if self.node_key in StreamingDataset._node_queues:
-                    try:
-                        StreamingDataset._node_queues[self.node_key].cancel_join_thread()
-                        StreamingDataset._node_queues[self.node_key].close()
-                    except Exception as e:
-                        logger.warning(f"[RANK {self.rank}] Error during queue cleanup: {e}")
-
                 # Join all socket threads
                 if self.node_key in StreamingDataset._node_sockets:
                     for address, handler in StreamingDataset._node_sockets[self.node_key].items():
                         logger.info(f"[RANK {self.rank}] Joining thread for address {address}")
                         handler.join(timeout=10.0)
 
-                # Remove references
+                # Remove references to node resources
                 StreamingDataset._node_ref_counts.pop(self.node_key, None)
                 StreamingDataset._node_sockets.pop(self.node_key, None)
                 StreamingDataset._node_stop_flags.pop(self.node_key, None)
-                StreamingDataset._node_queues.pop(self.node_key, None)
                 StreamingDataset._node_stats.pop(self.node_key, None)
 
         # Restore original signal handlers
