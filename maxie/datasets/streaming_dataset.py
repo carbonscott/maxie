@@ -582,20 +582,19 @@ class StreamingDataset(IterableDataset):
                         delattr(data_iterator, 'wait_start_time')
 
                     # Create tensor from raw bytes
-                    tensor = None
                     try:
                         if isinstance(tensor_data, bytes):
                             # Use shape information from metadata if available
                             if metadata and 'shape' in metadata:
                                 shape = metadata['shape']
-                                # Create tensor from bytes (assume float32 by default)
-                                tensor_np = np.frombuffer(tensor_data, dtype=np.float32).reshape(shape)
+                                # Create tensor from bytes with copy to make it writable
+                                tensor_np = np.frombuffer(tensor_data, dtype=np.float32).reshape(shape).copy()
                                 tensor = torch.from_numpy(tensor_np)
                             else:
                                 # No shape info - try to load numpy array
                                 buffer = io.BytesIO(tensor_data)
                                 tensor_np = np.load(buffer)
-                                tensor = torch.from_numpy(tensor_np)
+                                tensor = torch.from_numpy(tensor_np.copy() if not tensor_np.flags.writeable else tensor_np)
                     except Exception as e:
                         logger.error(f"[RANK {self.rank}] Error creating tensor from bytes: {e}")
                         continue
