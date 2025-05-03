@@ -243,16 +243,31 @@ class SocketHandler:
                         with node_stats["total_received"].get_lock():
                             node_stats["total_received"].value += 1
 
-                        # Extract tensor and metadata
-                        tensor, metadata = StreamingDataset._parse_data(data, rank)
+                        # Extract metadata
+                        metadata = None
+                        newline_index = data.find(b'\n')
+                        tensor_data = None
 
-                        if tensor is not None:
-                            # Put in the queue (block if full)
+                        if newline_index != -1:
+                            metadata_bytes = data[:newline_index]
+                            tensor_data = data[newline_index + 1:]  # Keep as bytes
+
                             try:
-                                node_queue.put((tensor, metadata, address), block=True, timeout=1.0)
+                                metadata = ast.literal_eval(metadata_bytes.decode('utf-8'))
+                            except Exception as e:
+                                logger.error(f"[NODE {node_id}][SOCKET {address}] Error parsing metadata: {e}")
+                                metadata = None
+                        else:
+                            # No metadata separator found
+                            tensor_data = data  # Assume all data is tensor
+
+                        # Put raw bytes and metadata in the queue
+                        if tensor_data is not None:
+                            try:
+                                node_queue.put((tensor_data, metadata, address), block=True, timeout=1.0)
                             except queue.Full:
                                 socket_stats['queue_full'] += 1
-                                logger.warning(f"[NODE {node_id}][SOCKET {address}] Queue full, dropping tensor")
+                                logger.warning(f"[NODE {node_id}][SOCKET {address}] Queue full, dropping data")
                                 continue
 
                             # Update latest global index if available
@@ -487,33 +502,6 @@ class StreamingDataset(IterableDataset):
         elif sig == signal.SIGTERM and self._original_sigterm_handler:
             self._original_sigterm_handler(sig, frame)
 
-    @staticmethod
-    def _parse_data(data, rank):
-        """Parse data received from the push socket"""
-        # Extract metadata
-        newline_index = data.find(b'\n')
-        if newline_index != -1:
-            metadata_bytes = data[:newline_index]
-            data = data[newline_index + 1:]
-
-            try:
-                metadata = ast.literal_eval(metadata_bytes.decode('utf-8'))
-            except Exception as e:
-                logger.error(f"[RANK {rank}] Error parsing metadata: {e}")
-                metadata = None
-        else:
-            metadata = None
-
-        # Extract tensor
-        try:
-            buffer = io.BytesIO(data)
-            tensor_np = np.load(buffer)
-            tensor = torch.from_numpy(tensor_np)
-            return tensor, metadata
-        except Exception as e:
-            logger.error(f"[RANK {rank}] Error deserializing tensor: {e}")
-            return None, None
-
     def __iter__(self):
         """Return an iterator over the streaming data"""
         # Get worker info for this worker
@@ -539,10 +527,10 @@ class StreamingDataset(IterableDataset):
                     try:
                         # Block with timeout
                         start_time = time.time()
-                        tensor, metadata, address = node_queue.get(block=True, timeout=0.1)
+                        tensor_data, metadata, address = node_queue.get(block=True, timeout=0.1)
 
                         # Check for poison pill
-                        if tensor == "__TERMINATE__":
+                        if tensor_data == "__TERMINATE__":
                             logger.info(f"[RANK {self.rank}] Worker {worker_id} received termination signal")
                             break
 
@@ -592,6 +580,29 @@ class StreamingDataset(IterableDataset):
                     # Reset wait timer since we got data
                     if hasattr(data_iterator, 'wait_start_time'):
                         delattr(data_iterator, 'wait_start_time')
+
+                    # Create tensor from raw bytes
+                    tensor = None
+                    try:
+                        if isinstance(tensor_data, bytes):
+                            # Use shape information from metadata if available
+                            if metadata and 'shape' in metadata:
+                                shape = metadata['shape']
+                                # Create tensor from bytes (assume float32 by default)
+                                tensor_np = np.frombuffer(tensor_data, dtype=np.float32).reshape(shape)
+                                tensor = torch.from_numpy(tensor_np)
+                            else:
+                                # No shape info - try to load numpy array
+                                buffer = io.BytesIO(tensor_data)
+                                tensor_np = np.load(buffer)
+                                tensor = torch.from_numpy(tensor_np)
+                    except Exception as e:
+                        logger.error(f"[RANK {self.rank}] Error creating tensor from bytes: {e}")
+                        continue
+
+                    if tensor is None:
+                        logger.warning(f"[RANK {self.rank}] Failed to create tensor from data")
+                        continue
 
                     # Convert dtype if specified
                     if self.dtype is not None:
